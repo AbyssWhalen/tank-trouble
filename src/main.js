@@ -13,12 +13,13 @@
 // ============================================================
 
 import {
-  CANVAS, PLAYER_COLORS, KEY_BINDINGS, MAZE_SIZE_BY_PLAYERS,
-  WALL, CELL_SIZE, BULLET, TANK, THEME,
+  CANVAS, PLAYER_COLORS, KEY_BINDINGS, MAZE_TIERS, TIER_POOL_BY_MODE,
+  WALL, CELL_SIZE, BULLET, TANK, THEME, ROUND_RESTART_DELAY,
 } from "./config.js";
 import { Player } from "./player.js";
 import { generateMaze } from "./maze.js";
 import { circleVsCircle } from "./collision.js";
+import { fitArena } from "./layout.js";
 import {
   isJustPressed, endFrame,
   bindMouse, getMousePos, isClicked,
@@ -53,9 +54,16 @@ let state = STATE.MENU;
 let maze;
 let players = [];
 let bullets = [];
-let offsetX = 0, offsetY = 0;  // 迷宫居中渲染偏移
+let offsetX = 0, offsetY = 0;  // 竞技场缩放后左上角偏移（fitArena 算出，含居中）
+let arenaScale = 1;            // 竞技场自适应缩放比，∈(0,1]；大图超画面时 <1
 let winner = null;             // ROUND_OVER 时存活的 Player；null 表示同归于尽
 let currentMode = "pvp";       // 当前对局模式，R 重开时复用
+
+// —— 整场累计状态（跨回合，不随 setupRound 重建）——
+// 累计分是「整场/玩家」维度的数据，挂在每回合重建的 Player 上会被一起归零，
+// 所以提到这里按玩家 index 存。开新整场(startMatch)才清零，回合重开不碰。
+let matchScores = [0, 0];      // 各玩家累计胜场，index 对齐 players
+let roundOverTimer = 0;        // ROUND_OVER 倒计时（秒），归零自动重开
 
 // —— 菜单按钮（逻辑坐标，不随迷宫平移）——
 const BTN_W = 300, BTN_H = 66;
@@ -70,14 +78,30 @@ function hitRect(mx, my, r) {
   return mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h;
 }
 
-// 开一局：按模式生成地图与玩家。当前只有 pvp（两个人类玩家）。
+// 开一整场：从菜单进入时调用。清零累计分，再开第一回合。
+// 与 setupRound 的分工：startMatch 负责「整场」级状态(分数)，
+// setupRound 只负责「单回合」级状态(地图/玩家)。回合重开只走 setupRound，分数不动。
+function startMatch(mode) {
+  matchScores = [0, 0];
+  setupRound(mode);
+}
+
+// 开一局：按模式从档位池随机抽一档地图，生成随机布局与玩家。
+// 缩放偏移由 fitArena 算（小图原样、大图等比缩小并居中），每回合重抽换图。
 function setupRound(mode) {
   currentMode = mode;
-  const { cols, rows } = MAZE_SIZE_BY_PLAYERS[2];
+
+  // 从该模式的档位池随机抽一档（pvp/pve → small|medium）
+  const pool = TIER_POOL_BY_MODE[mode] || TIER_POOL_BY_MODE.pvp;
+  const tier = pool[Math.floor(Math.random() * pool.length)];
+  const { cols, rows } = MAZE_TIERS[tier];
   maze = generateMaze(cols, rows);
 
-  offsetX = (CANVAS.width - cols * CELL_SIZE) / 2;
-  offsetY = (CANVAS.height - rows * CELL_SIZE) / 2;
+  // 自适应缩放 + 居中：把竞技场世界尺寸喂给 fitArena
+  const fit = fitArena(cols * CELL_SIZE, rows * CELL_SIZE);
+  arenaScale = fit.scale;
+  offsetX = fit.offsetX;
+  offsetY = fit.offsetY;
 
   const half = CELL_SIZE / 2;
   // P1 左上角格朝右，P2 右下角格朝左，初始背对，给彼此反应空间
@@ -115,7 +139,7 @@ function update(dt) {
       updatePlaying(dt);
       break;
     case STATE.ROUND_OVER:
-      updateRoundOver();
+      updateRoundOver(dt);
       break;
   }
   endFrame();
@@ -126,13 +150,21 @@ function updateMenu() {
   const { x: mx, y: my } = getMousePos();
   for (const b of buttons) {
     if (b.enabled && hitRect(mx, my, b)) {
-      setupRound(b.mode);
+      startMatch(b.mode);
       return;
     }
   }
 }
 
 function updatePlaying(dt) {
+  // 0) 对战中按 Esc 直接退回菜单（弃局，不计分）。
+  //    单机版可随时退；联机 v2 这里要改成「投降/确认退出」语义，
+  //    避免一人退局把别人的对战也带走。
+  if (isJustPressed("Escape")) {
+    state = STATE.MENU;
+    return;
+  }
+
   // 1) 每辆坦克各自移动转向 + 冷却
   for (const p of players) {
     p.tank.update(dt, maze.walls);
@@ -170,14 +202,19 @@ function updatePlaying(dt) {
   const alivePlayers = players.filter((p) => p.alive);
   if (alivePlayers.length <= 1) {
     winner = alivePlayers.length === 1 ? alivePlayers[0] : null;
+    // 计分：转 ROUND_OVER 这一帧加一次（同归于尽 winner=null 不加分）。
+    // 状态切走后不再进 updatePlaying，天然只触发一次，无需额外加锁。
+    if (winner) matchScores[winner.index]++;
+    roundOverTimer = ROUND_RESTART_DELAY; // 启动自动重开倒计时
     state = STATE.ROUND_OVER;
   }
 }
 
-function updateRoundOver() {
-  // 子弹继续飞一会儿更自然，但不再判胜负
-  if (isJustPressed("KeyR")) {
-    setupRound(currentMode);
+function updateRoundOver(dt) {
+  // 倒计时递减，到点自动重开同模式（累计分不清零）
+  roundOverTimer -= dt;
+  if (roundOverTimer <= 0 || isJustPressed("KeyR")) {
+    setupRound(currentMode); // R 可跳过等待立即重开
   } else if (isJustPressed("Escape")) {
     state = STATE.MENU;
   }
@@ -270,13 +307,16 @@ function renderArena() {
   const arenaH = maze.rows * CELL_SIZE;
 
   ctx.save();
+  // 先平移到竞技场左上角，再按 fitArena 算出的比例缩放。
+  // 之后所有绘制都用「世界坐标」（与碰撞/物理同一套），缩放只影响显示不影响物理。
   ctx.translate(offsetX, offsetY);
+  ctx.scale(arenaScale, arenaScale);
 
   // 地面
   ctx.fillStyle = THEME.arenaBg;
   ctx.fillRect(0, 0, arenaW, arenaH);
 
-  // 墙
+  // 内墙
   ctx.strokeStyle = WALL.color;
   ctx.lineWidth = WALL.thickness;
   ctx.lineCap = "round";
@@ -286,6 +326,13 @@ function renderArena() {
     ctx.lineTo(w.x2, w.y2);
     ctx.stroke();
   }
+
+  // 外框：沿竞技场四周叠一条更粗的边，框住整个场地（贴近原版醒目灰框）。
+  // 外圈本就有物理墙（子弹靠它反弹），这里只是渲染层加粗，不改碰撞。
+  ctx.strokeStyle = THEME.arenaBorder;
+  ctx.lineWidth = WALL.borderThickness;
+  ctx.lineJoin = "round";
+  ctx.strokeRect(0, 0, arenaW, arenaH);
 
   // 子弹在坦克下层
   for (const b of bullets) b.render(ctx);
@@ -314,12 +361,26 @@ function renderHud() {
     ctx.arc(left ? x + 7 : x - 7, y, 7, 0, Math.PI * 2);
     ctx.fill();
 
-    // 名称 + 状态
+    // 名称 + 累计比分 + 状态。比分紧跟名字，左玩家「P1 3」右玩家「3 P2」。
     ctx.fillStyle = p.alive ? THEME.textMain : THEME.textDim;
-    const status = p.alive ? "" : " 阵亡";
+    const score = matchScores[i];
+    // 阵亡标记朝「远离中线」的一侧排，左玩家放右尾、右玩家放左首，左右对称不粘连
+    const text = left
+      ? `${p.label}  ${score}${p.alive ? "" : "  阵亡"}`
+      : `${p.alive ? "" : "阵亡  "}${score}  ${p.label}`;
     const tx = left ? x + 22 : x - 22;
-    ctx.fillText(`${p.label}${status}`, tx, y);
+    ctx.fillText(text, tx, y);
   }
+
+  // 对战中底部提示：可随时按 Esc 退回菜单（仅 PLAYING 显示；
+  // ROUND_OVER 时 Esc 语义是「结算后返回」，由横幅另行提示，这里不重复）。
+  if (state === STATE.PLAYING) {
+    ctx.fillStyle = THEME.textDim;
+    ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Esc  退出对战", CANVAS.width / 2, CANVAS.height - 16);
+  }
+
   ctx.textAlign = "left";
 }
 
@@ -351,10 +412,16 @@ function renderRoundOverBanner() {
     ctx.fillText("同归于尽", cx, cy - 8);
   }
 
-  // 操作提示
+  // 倒计时提示：X.X 秒后自动开下一局
+  const secs = Math.max(0, roundOverTimer).toFixed(1);
+  ctx.fillStyle = THEME.textMain;
+  ctx.font = "22px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText(`${secs} 秒后下一局…`, cx, cy + 46);
+
+  // 小字快捷键
   ctx.fillStyle = THEME.textDim;
-  ctx.font = "19px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.fillText("R  再来一局          Esc  返回菜单", cx, cy + 50);
+  ctx.font = "15px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText("R  立即开始          Esc  返回菜单", cx, cy + 80);
 }
 
 // 圆角矩形路径（菜单按钮用）。只建路径，由调用方决定 fill/stroke。

@@ -12,12 +12,27 @@ export const CANVAS = {
 // 迷宫格子边长（像素）。格子越大，坦克活动空间越开阔。
 export const CELL_SIZE = 96;
 
-// 人数 → 地图尺寸（列数 cols × 行数 rows）
-// 人越多地图越大，保证不至于太挤。
-export const MAZE_SIZE_BY_PLAYERS = {
-  2: { cols: 9, rows: 7 },
-  3: { cols: 11, rows: 8 },
-  4: { cols: 12, rows: 9 },
+// 地图档位（tier）→ 尺寸（列数 cols × 行数 rows）。
+// 三档全是矩形（非正方），尺寸递增；具体墙体布局仍由 generateMaze 随机生成。
+//   small  7×5 = 672×480  比 medium 小一圈，1v1 更紧凑、贴脸快
+//   medium 9×7 = 864×672  阶段 0-4 的原始尺寸，刚好放进画布不缩放
+//   large 13×8 = 1248×768 明显更大更扁（贴近横屏原版），超画面 → 触发自适应缩放
+// 像素 = cols/rows × CELL_SIZE(96)。
+export const MAZE_TIERS = {
+  small: { cols: 7, rows: 5 },
+  medium: { cols: 9, rows: 7 },
+  large: { cols: 13, rows: 8 },
+};
+
+// 对战模式 → 可抽取的地图档位池。每回合 setupRound 从对应池随机抽一档。
+//   pvp(1v1) / pve(人机)：small / medium 二选一，回合间换图增加变化
+//   3p / 4p：归入联机 v2，档位已就绪（medium+large / large），本地版暂不可达
+// 注意：3p/4p 模式尚未实现，large 目前游戏内抽不到，仅由冒烟测试覆盖其缩放正确性。
+export const TIER_POOL_BY_MODE = {
+  pvp: ["small", "medium"],
+  pve: ["small", "medium"],
+  "3p": ["medium", "large"],
+  "4p": ["large"],
 };
 
 // 内部每条格子边放墙的概率（稀疏格栅的核心参数）。
@@ -89,8 +104,19 @@ export const ROUND_RESTART_DELAY = 1.5;
 
 // 墙体渲染
 export const WALL = {
-  color: "#2b2b33",   // 深炭灰细线，在浅灰场地上利落分明（原版风）
-  thickness: 5,
+  color: "#2b2b33",       // 深炭灰细线，在浅灰场地上利落分明（原版风）
+  thickness: 5,           // 内墙线宽
+  borderThickness: 8,     // 外框线宽（比内墙粗，框住整个竞技场，贴近截图的醒目灰框）
+};
+
+// 竞技场自适应缩放的视口预留（逻辑像素）。
+// 大图(large)超出画布时按比例缩到「可用区」内并居中；small/medium 放得下则 scale=1。
+// 顶部留多些避开 HUD 计分条，其余三边留窄边距，外框不贴边。
+export const VIEWPORT_PADDING = {
+  top: 36,
+  right: 18,
+  bottom: 12,
+  left: 18,
 };
 
 // ============================================================

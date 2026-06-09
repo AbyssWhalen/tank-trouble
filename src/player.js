@@ -18,7 +18,6 @@ export class Player {
     this.color = color;
     this.keys = keys;
     this.isAI = isAI;
-    this.score = 0; // 累计胜场，阶段 5 计分用
 
     this.tank = new Tank(x, y, angle, color, keys);
   }
