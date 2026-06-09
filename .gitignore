@@ -1,0 +1,24 @@
+# dependencies
+node_modules/
+
+# build output
+build/
+dist/
+
+# logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# env / secrets
+.env
+.env.*
+
+# 冒烟测试（用完即删、不进版本管理，仅本地调试用）
+__smoke*.mjs
+__*.html

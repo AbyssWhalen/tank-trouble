@@ -1,0 +1,40 @@
+{
+  "name": "tank-trouble",
+  "version": "0.1.0",
+  "description": "本地多人 + 人机对战的坦克回廊对战小游戏",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win"
+  },
+  "author": "Whalen",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.whalen.tankcorridor",
+    "productName": "TankCorridor",
+    "directories": {
+      "output": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "src/**/*",
+      "assets/**/*",
+      "index.html"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "坦克回廊"
+    }
+  }
+}
