@@ -1,7 +1,8 @@
 // ============================================================
 // main.js — 游戏入口与主循环 + 状态机
-//   MENU      —— 标题 + 模式按钮，鼠标点「双人对战」开局；「人机」占位（敬请期待）
-//   PLAYING   —— 2 辆坦克分置左上/右下角，各自键位独立操作，子弹全局，互相击中
+//   MENU      —— 标题 + 模式按钮，鼠标点「双人对战/人机对战」开局
+//   PLAYING   —— 2 辆坦克分置左上/右下角，各自控制源（键盘/AI）独立操作，
+//                子弹全局，互相击中
 //   ROUND_OVER—— 存活 ≤1 时显示获胜/同归于尽横幅，R 重开同模式，Esc 回菜单
 // 地图 2 人 = 9×7 = 864×672，稳放进 960×720 画布，居中平移，暂不缩放。
 //
@@ -14,12 +15,13 @@
 
 import {
   CANVAS, PLAYER_COLORS, KEY_BINDINGS, MAZE_TIERS, TIER_POOL_BY_MODE,
-  WALL, CELL_SIZE, BULLET, TANK, THEME, ROUND_RESTART_DELAY,
+  WALL, CELL_SIZE, BULLET, TANK, THEME, ROUND_RESTART_DELAY, AI_DIFFICULTY,
 } from "./config.js";
 import { Player } from "./player.js";
 import { generateMaze } from "./maze.js";
-import { circleVsCircle } from "./collision.js";
+import { circleVsCircle, separateCircles, resolveCircleWalls } from "./collision.js";
 import { fitArena } from "./layout.js";
+import { TankExplosion } from "./effects.js";
 import {
   isJustPressed, endFrame,
   bindMouse, getMousePos, isClicked,
@@ -28,20 +30,28 @@ import {
 const canvas = document.getElementById("game-canvas");
 const ctx = canvas.getContext("2d");
 
-// —— HiDPI 适配：把 canvas 内部分辨率拉到 dpr 倍，CSS 尺寸保持逻辑尺寸 ——
-// 这是「画质糊」的根因修复：之前 canvas 固定 960，在 125%/150% 缩放屏上被硬拉伸。
+// —— HiDPI 适配 + 视口自适应：内部分辨率拉到 dpr 倍保锐利；
+// CSS 尺寸在窗口装不下 960×720 时等比缩小（取宽高比的小者），
+// 保证画布永远完整可见——大地图底边/外框被窗口裁掉的根治就在这。
+// 鼠标坐标无需跟着改：input.bindMouse 按 getBoundingClientRect 归一化。
 function setupCanvas() {
   const dpr = window.devicePixelRatio || 1;
   canvas.width = CANVAS.width * dpr;
   canvas.height = CANVAS.height * dpr;
-  canvas.style.width = CANVAS.width + "px";
-  canvas.style.height = CANVAS.height + "px";
+  // 窗口装得下用原尺寸(scale=1)，装不下等比缩到正好放下（兜底 || 防 stub 环境无 innerWidth）
+  const fit = Math.min(
+    1,
+    (window.innerWidth || CANVAS.width) / CANVAS.width,
+    (window.innerHeight || CANVAS.height) / CANVAS.height
+  );
+  canvas.style.width = CANVAS.width * fit + "px";
+  canvas.style.height = CANVAS.height * fit + "px";
   // 之后所有绘制按逻辑坐标，乘 dpr 落到物理像素
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 setupCanvas();
 
-// 显示器 dpr 变化（拖窗到不同缩放的屏）时重设，保持锐利
+// 窗口尺寸/显示器 dpr 变化（拉窗口、拖到不同缩放的屏）时重算适配
 window.addEventListener("resize", setupCanvas);
 
 bindMouse(canvas);
@@ -54,6 +64,7 @@ let state = STATE.MENU;
 let maze;
 let players = [];
 let bullets = [];
+let effects = [];              // 进行中的视觉特效（爆炸等），done 后移除
 let offsetX = 0, offsetY = 0;  // 竞技场缩放后左上角偏移（fitArena 算出，含居中）
 let arenaScale = 1;            // 竞技场自适应缩放比，∈(0,1]；大图超画面时 <1
 let winner = null;             // ROUND_OVER 时存活的 Player；null 表示同归于尽
@@ -64,14 +75,27 @@ let currentMode = "pvp";       // 当前对局模式，R 重开时复用
 // 所以提到这里按玩家 index 存。开新整场(startMatch)才清零，回合重开不碰。
 let matchScores = [0, 0];      // 各玩家累计胜场，index 对齐 players
 let roundOverTimer = 0;        // ROUND_OVER 倒计时（秒），归零自动重开
+let aiLevel = "normal";        // 选中的 AI 难度档（菜单 chip 单选），开局/R 重开沿用
 
 // —— 菜单按钮（逻辑坐标，不随迷宫平移）——
 const BTN_W = 300, BTN_H = 66;
 const BTN_X = (CANVAS.width - BTN_W) / 2;
 const buttons = [
   { label: "双人对战", sub: "P1 vs P2", mode: "pvp", enabled: true, x: BTN_X, y: 322, w: BTN_W, h: BTN_H },
-  { label: "人机对战", sub: "敬请期待", mode: "pve", enabled: false, x: BTN_X, y: 410, w: BTN_W, h: BTN_H },
+  { label: "人机对战", sub: "P1 vs AI", mode: "pve", enabled: true, x: BTN_X, y: 410, w: BTN_W, h: BTN_H },
 ];
+
+// —— AI 难度 chip（人机按钮正下方一排单选，点选改 aiLevel）——
+const CHIP_W = 88, CHIP_H = 32, CHIP_GAP = 14;
+const chipKeys = Object.keys(AI_DIFFICULTY); // ["easy","normal","hard"]，展示顺序即定义顺序
+const CHIPS_X = (CANVAS.width - (chipKeys.length * CHIP_W + (chipKeys.length - 1) * CHIP_GAP)) / 2;
+const difficultyChips = chipKeys.map((key, i) => ({
+  key,
+  x: CHIPS_X + i * (CHIP_W + CHIP_GAP),
+  y: 494, // 人机按钮底边 476 再留 18px
+  w: CHIP_W,
+  h: CHIP_H,
+}));
 
 // 点 (mx,my) 是否落在矩形内
 function hitRect(mx, my, r) {
@@ -104,18 +128,23 @@ function setupRound(mode) {
   offsetY = fit.offsetY;
 
   const half = CELL_SIZE / 2;
-  // P1 左上角格朝右，P2 右下角格朝左，初始背对，给彼此反应空间
+  // P1 左上角格朝右，P2 右下角格朝左，初始背对，给彼此反应空间。
+  // pve 模式 P2 是 AI：keys=null + isAI=true，Player 内建 AiController。
+  const p2IsAI = mode === "pve";
   players = [
     new Player(0, PLAYER_COLORS[0], KEY_BINDINGS[0], half, half, 0),
     new Player(
-      1, PLAYER_COLORS[1], KEY_BINDINGS[1],
+      1, PLAYER_COLORS[1], p2IsAI ? null : KEY_BINDINGS[1],
       (cols - 1) * CELL_SIZE + half,
       (rows - 1) * CELL_SIZE + half,
-      Math.PI
+      Math.PI,
+      p2IsAI,
+      aiLevel
     ),
   ];
 
   bullets = [];
+  effects = [];
   winner = null;
   state = STATE.PLAYING;
 }
@@ -148,6 +177,13 @@ function update(dt) {
 function updateMenu() {
   if (!isClicked()) return;
   const { x: mx, y: my } = getMousePos();
+  // 难度 chip：单选切换，不开局
+  for (const c of difficultyChips) {
+    if (hitRect(mx, my, c)) {
+      aiLevel = c.key;
+      return;
+    }
+  }
   for (const b of buttons) {
     if (b.enabled && hitRect(mx, my, b)) {
       startMatch(b.mode);
@@ -165,23 +201,48 @@ function updatePlaying(dt) {
     return;
   }
 
-  // 1) 每辆坦克各自移动转向 + 冷却
-  for (const p of players) {
-    p.tank.update(dt, maze.walls);
+  // 1) 收集本帧所有玩家的控制指令（人读键盘 / AI 决策），与执行分离——
+  //    保持"先全员移动、再全员开火"的原有顺序，也让 AI 看到的是同一帧的世界
+  const world = { maze, players, bullets };
+  const controls = players.map((p) => p.getControls(dt, world));
+
+  // 2) 每辆坦克按指令移动转向 + 冷却
+  for (let i = 0; i < players.length; i++) {
+    players[i].tank.update(dt, maze.walls, controls[i]);
   }
 
-  // 2) 开炮：收集新子弹（传入全局 bullets 以统计己方在场数，实现 maxAlive 限流）
-  for (const p of players) {
-    const b = p.tank.tryFire(bullets);
+  // 2.5) 坦克间碰撞：两车不可重叠，相撞沿圆心连线推开（等量分担）。
+  //      推开可能把车顶进墙，再各自做一次贴墙解算兜底。
+  //      纯位置修正、无反弹动量——手感就是"顶住推不动"，贴近原版。
+  const aliveTanks = players.filter((p) => p.alive).map((p) => p.tank);
+  for (let i = 0; i < aliveTanks.length; i++) {
+    for (let j = i + 1; j < aliveTanks.length; j++) {
+      const a = aliveTanks[i];
+      const b = aliveTanks[j];
+      const sep = separateCircles(a.x, a.y, b.x, b.y, TANK.radius * 2);
+      if (!sep) continue;
+      a.x = sep.ax; a.y = sep.ay;
+      b.x = sep.bx; b.y = sep.by;
+      const fa = resolveCircleWalls(a.x, a.y, TANK.radius, maze.walls);
+      a.x = fa.x; a.y = fa.y;
+      const fb = resolveCircleWalls(b.x, b.y, TANK.radius, maze.walls);
+      b.x = fb.x; b.y = fb.y;
+    }
+  }
+
+  // 3) 开炮：收集新子弹（传 bullets 统计己方在场数实现 maxAlive 限流；
+  //    传 walls 做贴墙出膛修正，防炮口越墙穿墙）
+  for (let i = 0; i < players.length; i++) {
+    const b = players[i].tank.tryFire(bullets, controls[i].fire, maze.walls);
     if (b) bullets.push(b);
   }
 
-  // 3) 子弹更新（移动 + 反弹）
+  // 4) 子弹更新（移动 + 反弹）
   for (const b of bullets) {
     b.update(dt, maze.walls);
   }
 
-  // 4) 击中判定：每颗活子弹 vs 每个存活坦克
+  // 5) 击中判定：每颗活子弹 vs 每个存活坦克
   for (const b of bullets) {
     if (b.dead) continue;
     for (const p of players) {
@@ -190,15 +251,18 @@ function updatePlaying(dt) {
       if (circleVsCircle(b.x, b.y, BULLET.radius, p.tank.x, p.tank.y, TANK.radius)) {
         p.tank.alive = false;
         b.dead = true;
+        // 死亡演出：烟团 + 碎片四散（纯表现，不影响逻辑）
+        effects.push(new TankExplosion(p.tank.x, p.tank.y, p.color));
         break; // 一颗子弹只打一个
       }
     }
   }
 
-  // 5) 清理消亡子弹
+  // 6) 清理消亡子弹 + 推进特效（播完移除）
   bullets = bullets.filter((b) => !b.dead);
+  updateEffects(dt);
 
-  // 6) 胜负判定：存活 ≤1 转结算
+  // 7) 胜负判定：存活 ≤1 转结算
   const alivePlayers = players.filter((p) => p.alive);
   if (alivePlayers.length <= 1) {
     winner = alivePlayers.length === 1 ? alivePlayers[0] : null;
@@ -211,6 +275,9 @@ function updatePlaying(dt) {
 }
 
 function updateRoundOver(dt) {
+  // 结算横幅期间继续推进爆炸动画（击杀大多发生在转场瞬间，动画要播完）
+  updateEffects(dt);
+
   // 倒计时递减，到点自动重开同模式（累计分不清零）
   roundOverTimer -= dt;
   if (roundOverTimer <= 0 || isJustPressed("KeyR")) {
@@ -218,6 +285,12 @@ function updateRoundOver(dt) {
   } else if (isJustPressed("Escape")) {
     state = STATE.MENU;
   }
+}
+
+// 推进所有特效，播完的移除。PLAYING 与 ROUND_OVER 共用。
+function updateEffects(dt) {
+  for (const e of effects) e.update(dt);
+  effects = effects.filter((e) => !e.done);
 }
 
 function render() {
@@ -295,6 +368,30 @@ function renderMenu() {
     ctx.fillText(b.sub, b.x + b.w / 2, b.y + b.h / 2 + 16);
   }
 
+  // AI 难度 chip（单选：选中反色实心，未选白底；只影响人机对战）
+  ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
+  // 行首小标签，贴在第一个 chip 左侧
+  ctx.textAlign = "right";
+  ctx.fillStyle = THEME.textDim;
+  ctx.fillText("AI 难度", difficultyChips[0].x - 14, difficultyChips[0].y + CHIP_H / 2);
+  ctx.textAlign = "center";
+  for (const c of difficultyChips) {
+    const selected = c.key === aiLevel;
+    const hover = hitRect(mx, my, c);
+
+    ctx.fillStyle = selected ? THEME.btnBorder : THEME.btnFill;
+    roundRect(c.x, c.y, c.w, c.h, 8);
+    ctx.fill();
+
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = selected || hover ? THEME.btnBorder : THEME.btnDisabledBorder;
+    roundRect(c.x, c.y, c.w, c.h, 8);
+    ctx.stroke();
+
+    ctx.fillStyle = selected ? THEME.btnTextHover : hover ? THEME.textMain : THEME.textDim;
+    ctx.fillText(AI_DIFFICULTY[c.key].label, c.x + c.w / 2, c.y + c.h / 2);
+  }
+
   // 底部版本/提示
   ctx.fillStyle = THEME.textDim;
   ctx.font = "13px system-ui, sans-serif";
@@ -337,6 +434,8 @@ function renderArena() {
   // 子弹在坦克下层
   for (const b of bullets) b.render(ctx);
   for (const p of players) p.tank.render(ctx);
+  // 特效最上层（爆炸烟团盖住尸体位置）
+  for (const e of effects) e.render(ctx);
 
   ctx.restore();
 

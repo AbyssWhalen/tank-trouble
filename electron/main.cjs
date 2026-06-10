@@ -4,9 +4,12 @@ const path = require('path');
 function createWindow() {
   const win = new BrowserWindow({
     width: 1000,
-    height: 800,
-    minWidth: 980,
-    minHeight: 760,
+    height: 780,
+    minWidth: 700,
+    minHeight: 540,
+    // 尺寸按"内容区"算而非外框——否则标题栏吃掉 ~40px 高度，
+    // 内容区不足 720，大地图（medium 底边在画布 y≈712）下边和外框被裁掉
+    useContentSize: true,
     center: true,
     backgroundColor: '#e8e8ec',
     title: '坦克回廊',

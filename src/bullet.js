@@ -64,9 +64,13 @@ export class Bullet {
   }
 
   // 击中判定时调用：该子弹此刻是否可以伤害 tank
-  // 自己发射的子弹有一段宽限期，过后才会反弹回来误伤自己
+  // 出膛宽限只保护"尚未反弹"的子弹（防止刚出炮口就打死自己）；
+  // 一旦撞墙反弹就立刻解除豁免——贴墙开炮弹回来打死自己是原版的
+  // 经典自杀手感，不能被宽限期豁免掉。
   canHit(tank) {
-    if (tank === this.owner && this.age < BULLET.selfHitGrace) return false;
+    if (tank === this.owner && this.bounces === 0 && this.age < BULLET.selfHitGrace) {
+      return false;
+    }
     return true;
   }
 

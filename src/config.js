@@ -102,6 +102,58 @@ export const KEY_BINDINGS = [
 // 回合结束到下一局重开的延迟（秒）
 export const ROUND_RESTART_DELAY = 1.5;
 
+// 坦克被击破的爆炸效果（参考原版：深色烟团 + 浅色碎片四散）。
+// 时长须 < ROUND_RESTART_DELAY，保证结算横幅期间能播完整段动画。
+// 联机 v2 同款复用：死亡有视觉反馈而不是凭空消失。
+export const EXPLOSION = {
+  duration: 0.9,         // 总时长（秒）
+  shardCount: [6, 9],    // 碎片数量随机区间
+  shardSpeed: [60, 200], // 碎片初速（像素/秒），随机
+  shardSize: [5, 11],    // 碎片外接半径（像素），随机
+  shardDrag: 3.0,        // 碎片线性阻尼（指数衰减系数/秒），飞出后迅速减速
+  shardSpin: 6,          // 碎片最大自旋角速度（弧度/秒，正负随机）
+  smokeCount: 3,         // 烟团数量（中心一大两小错位叠放）
+  smokeRadius: [12, 22], // 烟团初始半径随机区间
+  smokeGrow: 30,         // 烟团膨胀速度（像素/秒）
+  fadeStart: 0.45,       // 动画进度超过此比例后开始整体淡出（0~1）
+};
+
+// AI 参数（阶段 6 基础 AI：会追人、会开枪、能被打死；不躲弹不预判）。
+// 这里只放与难度无关的共享参数；随难度变化的旋钮在下方 AI_DIFFICULTY。
+export const AI = {
+  moveAngleGate: 1.0,       // 朝路点偏角小于此值才前进（边转边走，像人操作）
+  hitSlack: 1.5,            // 几何必中角的半径余量倍数：以"偏角在敌人处的横向偏差
+                            // ≤ (坦克半径+子弹半径)×此值"反推必中角，1.5 倍是给
+                            // 对方挪动留的提前量。开火窗口 = 必中角 × 各难度 aimSkill
+  dodgeCommit: 0.3,         // 闪避航向锁定时长（秒）：威胁评估逐帧重算会让 AI 左右抽搐，
+                            // 锁住一条道闪到底；威胁中途消失也把机动做完（半途折返等于没躲）
+  dodgeClearance: 40,       // 闪避方向探测距离（像素）：朝墙里闪等于白闪，先探路再选
+  dodgeWallPenalty: 1000,   // 朝墙航向的安全分罚没值：足够大保证只有八方皆堵才选朝墙的
+  stuckWindow: 0.6,         // 卡住检测时窗（秒）
+  stuckMinDist: 6,          // 时窗内想动却位移低于此值（像素）→ 判卡住
+  unstickTime: 0.45,        // 脱困机动时长（秒）：倒车 + 随机方向转向
+};
+
+// AI 难度三档（菜单可选，默认 normal）。难度只调决策参数、不动坦克物理：
+//   aimSkill       开火窗口倍数：开火条件 = 瞄准偏角 < 几何必中角 × 此值。
+//                  必中角随距离变化（近大远小），所以贴脸大家都敢秒开、
+//                  远距离都要求瞄正——这是"像人"的关键；倍数 >1 的档位
+//                  接受脱靶提前开（糙），<1 的要求留命中余量（稳准狠）
+//   fireCooldown   开火间隔随机区间（秒）。Tank 的 0.15s 微冷却挡不住逐帧
+//                  fire=true 的连发，AI 必须自带节奏闸门
+//   replanInterval BFS 重算路径间隔（秒），越小追人越紧
+//   dodgeHorizon   躲弹预判窗（秒）：对子弹直线外推，最近逼近时刻落在窗内才视为
+//                  威胁并闪避。0 = 不躲弹（简单档保持好欺负）
+//   dodgeMargin    躲弹安全余量（像素）：在"坦克半径+子弹半径"外再加的提前量，
+//                  越大躲得越早越稳
+//   ammoBudget     同屏自留弹上限（发）：AI 的自我开火约束，超过就憋着不打——
+//                  留弹防身/抓近身机会，不像无脑 AI 一照面把 maxAlive 倒光
+export const AI_DIFFICULTY = {
+  easy:   { label: "简单", aimSkill: 2.0, fireCooldown: [1.0, 1.8],   replanInterval: 0.7,  dodgeHorizon: 0,    dodgeMargin: 0,  ammoBudget: 2 },
+  normal: { label: "普通", aimSkill: 1.5, fireCooldown: [0.7, 1.4],   replanInterval: 0.55, dodgeHorizon: 0.35, dodgeMargin: 4,  ammoBudget: 2 },
+  hard:   { label: "困难", aimSkill: 0.9, fireCooldown: [0.25, 0.55], replanInterval: 0.25, dodgeHorizon: 0.9,  dodgeMargin: 14, ammoBudget: 3 },
+};
+
 // 墙体渲染
 export const WALL = {
   color: "#2b2b33",       // 深炭灰细线，在浅灰场地上利落分明（原版风）

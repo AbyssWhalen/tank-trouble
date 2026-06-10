@@ -1,48 +1,40 @@
 // ============================================================
 // tank.js — 坦克实体
-// 职责：维护位置/朝向，按输入移动转向，渲染自身。
-// 碰撞（撞墙、中弹）放到后续阶段，这里只管"自己怎么动、怎么画"。
+// 职责：维护位置/朝向，按「控制指令」移动转向，渲染自身。
+// 不直接读键盘：每帧由外部传入 { turn, move, fire }（人类来自
+// input.readControls，AI 来自 ai.js），坦克只消费指令不关心来源。
 // ============================================================
 
 import { TANK, BULLET } from "./config.js";
-import { isDown, isJustPressed } from "./input.js";
-import { resolveCircleWalls } from "./collision.js";
+import { resolveCircleWalls, segmentVsSegmentParam } from "./collision.js";
 import { Bullet } from "./bullet.js";
 
 export class Tank {
   // x, y: 车体中心世界坐标（像素）
   // angle: 朝向弧度，0 指向右(+x)，顺时针为正
   // color: 车体颜色
-  // keys: 该坦克的键位 { forward, back, left, right, fire }
-  constructor(x, y, angle, color, keys) {
+  constructor(x, y, angle, color) {
     this.x = x;
     this.y = y;
     this.angle = angle;
     this.color = color;
-    this.keys = keys;
     this.alive = true;
   }
 
   // dt: 距上一帧的秒数；walls: 墙线段数组，用于撞墙不穿
-  update(dt, walls) {
+  // controls: 本帧控制指令 { turn: -1|0|1, move: -1|0|1 }（fire 走 tryFire）
+  update(dt, walls, controls) {
     if (!this.alive) return;
 
     // 开炮冷却递减
     if (this.cooldown > 0) this.cooldown -= dt;
 
-    // 转向：左右键原地转
-    let turn = 0;
-    if (isDown(this.keys.left)) turn -= 1;
-    if (isDown(this.keys.right)) turn += 1;
-    this.angle += turn * TANK.turnSpeed * dt;
+    // 转向：原地转
+    this.angle += controls.turn * TANK.turnSpeed * dt;
 
     // 前进/后退：沿朝向移动
-    let move = 0;
-    if (isDown(this.keys.forward)) move += 1;
-    if (isDown(this.keys.back)) move -= 1;
-
-    if (move !== 0) {
-      const dist = move * TANK.moveSpeed * dt;
+    if (controls.move !== 0) {
+      const dist = controls.move * TANK.moveSpeed * dt;
       this.x += Math.cos(this.angle) * dist;
       this.y += Math.sin(this.angle) * dist;
     }
@@ -55,16 +47,18 @@ export class Tank {
     }
   }
 
-  // 尝试开炮：fire 键边沿触发 + 冷却就绪 + 同屏己方子弹未达上限时，
+  // 尝试开炮：wantFire 为 true + 冷却就绪 + 同屏己方子弹未达上限时，
   // 从炮口生成一发子弹返回；否则返回 null。
+  // wantFire 即控制指令的 fire 位（人类是边沿触发，AI 自带开火节奏）。
   // bullets: 全局子弹数组，用于统计自己还有几发在场（实现 maxAlive 限流）——
   // 这是原版"靠子弹上限而非冷却限流"的核心，去掉固定冷却后尤其关键。
+  // walls: 墙线段数组，用于贴墙出膛修正（防穿墙）。
   // 子弹的归属(owner)记为本坦克，便于"出膛宽限期"等判定。
   // 返回的子弹由 main 收集进全局子弹数组统一管理。
-  tryFire(bullets) {
+  tryFire(bullets, wantFire, walls) {
     if (!this.alive) return null;
     if (this.cooldown > 0) return null;
-    if (!isJustPressed(this.keys.fire)) return null;
+    if (!wantFire) return null;
 
     // 同屏己方存活子弹数达上限则不发射
     let mine = 0;
@@ -79,8 +73,25 @@ export class Tank {
 
     // 炮口位置：从车体中心沿朝向伸出（炮管末端再多探出一点，避免子弹生成在车体内被自己挡）
     const muzzleDist = TANK.bodyLength / 2 + TANK.barrelLength + BULLET.radius + 2;
-    const bx = this.x + Math.cos(this.angle) * muzzleDist;
-    const by = this.y + Math.sin(this.angle) * muzzleDist;
+
+    // 贴墙出膛修正：炮口(36px)比车体碰撞半径(16px)伸得远，贴墙时炮口已越到
+    // 墙外侧，子弹会凭空出现在墙另一边——穿墙 bug 的根因。
+    // 沿"中心→炮口"连线探测所有墙，被截断就把出膛点压回墙内侧一点。
+    // 压回后子弹下一帧即被墙反射，贴脸怼墙开炮会弹回来——原版同款自杀手感。
+    let spawnDist = muzzleDist;
+    if (walls && walls.length) {
+      const mx = this.x + Math.cos(this.angle) * muzzleDist;
+      const my = this.y + Math.sin(this.angle) * muzzleDist;
+      for (const w of walls) {
+        const t = segmentVsSegmentParam(this.x, this.y, mx, my, w.x1, w.y1, w.x2, w.y2);
+        if (t !== null) {
+          spawnDist = Math.min(spawnDist, t * muzzleDist - BULLET.radius - 1);
+        }
+      }
+    }
+
+    const bx = this.x + Math.cos(this.angle) * spawnDist;
+    const by = this.y + Math.sin(this.angle) * spawnDist;
     const vx = Math.cos(this.angle) * BULLET.speed;
     const vy = Math.sin(this.angle) * BULLET.speed;
 

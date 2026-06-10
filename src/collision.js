@@ -67,6 +67,28 @@ export function resolveCircleWalls(cx, cy, r, walls, iterations = 3) {
   return { x, y };
 }
 
+// 等质量双圆分离（坦克-坦克碰撞用）：圆心距小于 minDist 时沿连线各推一半，
+// 返回修正后两圆心 { ax, ay, bx, by }；未重叠返回 null。
+// 完全重合（圆心距≈0）退化沿 +x 推开，保证总能分离。
+export function separateCircles(ax, ay, bx, by, minDist) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const distSq = dx * dx + dy * dy;
+  if (distSq >= minDist * minDist) return null;
+
+  const dist = Math.sqrt(distSq);
+  let nx = 1, ny = 0; // 重合退化方向
+  if (dist > 1e-6) {
+    nx = dx / dist;
+    ny = dy / dist;
+  }
+  const push = (minDist - dist) / 2;
+  return {
+    ax: ax - nx * push, ay: ay - ny * push,
+    bx: bx + nx * push, by: by + ny * push,
+  };
+}
+
 // 反射向量：入射速度 (vx,vy) 碰到单位法线 (nx,ny) 后的反射速度。
 // v' = v - 2(v·n)n   （阶段 3 子弹反弹用）
 export function reflect(vx, vy, nx, ny) {
@@ -80,4 +102,29 @@ export function circleVsCircle(x1, y1, r1, x2, y2, r2) {
   const dy = y2 - y1;
   const rr = r1 + r2;
   return dx * dx + dy * dy <= rr * rr;
+}
+
+// 两线段 AB(x1,y1→x2,y2) 与 CD(x3,y3→x4,y4) 相交检测——参数版。
+// 标准参数法：解 A+t·AB = C+u·CD，t、u 都落在 [0,1] 即相交，
+// 返回交点在 AB 上的参数 t；不相交返回 null。
+// 平行/共线（分母≈0）一律按不相交处理——墙都有渲染厚度，
+// 恰好沿墙面掠过的射线判通判堵都无碍，不值得为共线重叠做精确解。
+// 用途：炮口出膛点贴墙修正（需要知道截在哪）、segmentVsSegment 的底层。
+export function segmentVsSegmentParam(x1, y1, x2, y2, x3, y3, x4, y4) {
+  const dx1 = x2 - x1;
+  const dy1 = y2 - y1;
+  const dx2 = x4 - x3;
+  const dy2 = y4 - y3;
+
+  const denom = dx1 * dy2 - dy1 * dx2;
+  if (Math.abs(denom) < 1e-9) return null; // 平行或共线
+
+  const t = ((x3 - x1) * dy2 - (y3 - y1) * dx2) / denom;
+  const u = ((x3 - x1) * dy1 - (y3 - y1) * dx1) / denom;
+  return t >= 0 && t <= 1 && u >= 0 && u <= 1 ? t : null;
+}
+
+// 两线段是否相交（布尔便捷版）。用途：AI 视线/探路检测。
+export function segmentVsSegment(x1, y1, x2, y2, x3, y3, x4, y4) {
+  return segmentVsSegmentParam(x1, y1, x2, y2, x3, y3, x4, y4) !== null;
 }

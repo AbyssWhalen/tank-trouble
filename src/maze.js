@@ -17,7 +17,8 @@
 
 import { CELL_SIZE, WALL_DENSITY } from "./config.js";
 
-const DIRS = [
+// 四方向表：格间邻接 + 对应墙面名。maze 自用（泛洪/敲墙），ai.js 寻路也复用。
+export const DIRS = [
   { dc: 0, dr: -1, wall: "top", opposite: "bottom" },
   { dc: 1, dr: 0, wall: "right", opposite: "left" },
   { dc: 0, dr: 1, wall: "bottom", opposite: "top" },
