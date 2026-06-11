@@ -122,9 +122,17 @@ export const EXPLOSION = {
 // 这里只放与难度无关的共享参数；随难度变化的旋钮在下方 AI_DIFFICULTY。
 export const AI = {
   moveAngleGate: 1.0,       // 朝路点偏角小于此值才前进（边转边走，像人操作）
+  closeCombatRange: 130,    // 近战反打距离（像素）：贴得比这近 + 有视线 + 枪已就绪时
+                            // 反打优先于躲弹——近距必中角大、弹程短，干掉火力源
+                            // 比躲单发子弹划算；枪没就绪才专心躲
+  closeCooldownBoost: 4,    // 敌人进近战圈后开火冷却的流逝倍速：节奏门是远距防狙神的，
+                            // 贴脸刀战谁都是倾泻——普通档 0.7~1.4s 实际变 0.18~0.35s/发；
+                            // 也覆盖"远处刚开完炮、对方冲脸"时烧掉残余冷却
   hitSlack: 1.5,            // 几何必中角的半径余量倍数：以"偏角在敌人处的横向偏差
                             // ≤ (坦克半径+子弹半径)×此值"反推必中角，1.5 倍是给
                             // 对方挪动留的提前量。开火窗口 = 必中角 × 各难度 aimSkill
+  leadSmooth: 0.35,         // 敌速度估计的指数平滑系数（逐帧差分太抖，平滑后≈半拍收敛）；
+                            // 速度估计喂给拦截预判（leadFactor），让 AI 打"你将到的位置"
   dodgeCommit: 0.3,         // 闪避航向锁定时长（秒）：威胁评估逐帧重算会让 AI 左右抽搐，
                             // 锁住一条道闪到底；威胁中途消失也把机动做完（半途折返等于没躲）
   dodgeClearance: 40,       // 闪避方向探测距离（像素）：朝墙里闪等于白闪，先探路再选
@@ -146,12 +154,15 @@ export const AI = {
 //                  威胁并闪避。0 = 不躲弹（简单档保持好欺负）
 //   dodgeMargin    躲弹安全余量（像素）：在"坦克半径+子弹半径"外再加的提前量，
 //                  越大躲得越早越稳
-//   ammoBudget     同屏自留弹上限（发）：AI 的自我开火约束，超过就憋着不打——
-//                  留弹防身/抓近身机会，不像无脑 AI 一照面把 maxAlive 倒光
+//   ammoBudget     同屏自留弹上限（发）：AI 的自我开火约束（远距生效，近战放开
+//                  到 maxAlive-1），留弹防身/抓近身机会，不一照面倒光也不被饿死
+//   leadFactor     拦截预判提前量比例：0 = 打当前位置（简单档老实人），
+//                  1 = 全量提前（打"你将到的位置"）。这是"精密计算"的核心——
+//                  打高速横移目标的当前位置是计算出的必失，AI 会忍住不浪费那发
 export const AI_DIFFICULTY = {
-  easy:   { label: "简单", aimSkill: 2.0, fireCooldown: [1.0, 1.8],   replanInterval: 0.7,  dodgeHorizon: 0,    dodgeMargin: 0,  ammoBudget: 2 },
-  normal: { label: "普通", aimSkill: 1.5, fireCooldown: [0.7, 1.4],   replanInterval: 0.55, dodgeHorizon: 0.35, dodgeMargin: 4,  ammoBudget: 2 },
-  hard:   { label: "困难", aimSkill: 0.9, fireCooldown: [0.25, 0.55], replanInterval: 0.25, dodgeHorizon: 0.9,  dodgeMargin: 14, ammoBudget: 3 },
+  easy:   { label: "简单", aimSkill: 2.0, fireCooldown: [1.0, 1.8],   replanInterval: 0.7,  dodgeHorizon: 0,    dodgeMargin: 0,  ammoBudget: 2, leadFactor: 0 },
+  normal: { label: "普通", aimSkill: 1.5, fireCooldown: [0.7, 1.4],   replanInterval: 0.55, dodgeHorizon: 0.35, dodgeMargin: 4,  ammoBudget: 2, leadFactor: 0.6 },
+  hard:   { label: "困难", aimSkill: 0.9, fireCooldown: [0.25, 0.55], replanInterval: 0.25, dodgeHorizon: 0.9,  dodgeMargin: 14, ammoBudget: 3, leadFactor: 1.0 },
 };
 
 // 墙体渲染

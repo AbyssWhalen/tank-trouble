@@ -8,13 +8,16 @@
 //           （沿该向开车未来离任何子弹的最近距离），朝墙重罚、取最高分；
 //           航向锁定 dodgeCommit 秒防抖动；屁股更朝逃生方向时直接倒车。
 //           躲弹灵敏度（预判窗/安全余量）随难度变化，简单档不躲
+//   反打 —— 攻防决策：贴脸+有视线+枪已就绪时反打优先于躲弹（中断闪避
+//           转炮开火），枪没就绪才专心躲——"打一发→游走→再打"的近战节奏
 //   寻路 —— 有视线直接朝敌人本体走；没视线 BFS 走格子图
 //           （maze.cells 自带四面墙开关，天然邻接表），定期重算
 //   移动 —— 朝目标转向（取最短旋转方向），大致对准才前进（边转边走）；
 //           持续想动却没挪窝 → 判卡住，倒车+随机转向脱困
-//   开火 —— 三道门：节奏冷却（随机化防狙神）、弹药预算（不一梭子倒光）、
-//           命中质量（窗口 = 几何必中角×难度技巧系数，近大远小——
-//           贴脸窗口极宽，近战边追边连续还手，无需特殊缠斗机动）
+//   开火 —— 三道门：节奏冷却（随机化防狙神，近战圈倍速流逝）、弹药预算
+//           （远距守纪律/近战放开到 maxAlive-1）、命中质量（窗口=几何必中角
+//           ×难度技巧系数，对「拦截点」评估——持续估计敌速度解拦截方程，
+//           打"你将到的位置"；打横移目标当前位置是计算出的必失，会忍住）
 // 不做的：弹道预判射击、跳弹瞄准（难度升级留给后续阶段）。
 // ============================================================
 
@@ -155,6 +158,27 @@ function findPath(maze, from, to) {
   return path.reverse();
 }
 
+// 拦截时刻：敌人相对位置 (rx,ry)、速度 (vex,vey)，子弹速度 vb，
+// 解 |r + ve·t| = vb·t → (ve²−vb²)t² + 2(r·ve)t + r² = 0，取最小正根。
+// 本游戏 vb(180) > 坦克极速(120)，方程恒有唯一正根；返回 null 仅是数值兜底。
+// 导出供冒烟测试直接验证解算正确性。
+export function interceptTime(rx, ry, vex, vey, vb) {
+  const a = vex * vex + vey * vey - vb * vb;
+  const b = 2 * (rx * vex + ry * vey);
+  const c = rx * rx + ry * ry;
+  if (Math.abs(a) < 1e-9) {
+    return b < -1e-9 ? -c / b : null; // 弹速与敌速相同的退化情形
+  }
+  const disc = b * b - 4 * a * c;
+  if (disc < 0) return null;
+  const sq = Math.sqrt(disc);
+  let t = Infinity;
+  for (const root of [(-b - sq) / (2 * a), (-b + sq) / (2 * a)]) {
+    if (root > 0 && root < t) t = root;
+  }
+  return Number.isFinite(t) ? t : null;
+}
+
 export class AiController {
   // player: 本 AI 操控的 Player（从中取自己的坦克）
   // level:  难度档位 key（AI_DIFFICULTY 的 easy/normal/hard），决定瞄准/节奏/反应
@@ -169,6 +193,12 @@ export class AiController {
     // 闪避机动：航向选定后锁 dodgeCommit 秒（防抖），锁定期内一条道闪到底
     this.dodgeTimer = 0;     // >0 表示正在执行闪避机动
     this.dodgeHeading = 0;   // 锁定的逃生航向（弧度）
+
+    // 敌速度估计（拦截预判用）：逐帧差分 + 指数平滑
+    this.lastEnemyX = null;  // null = 尚无上一帧位置
+    this.lastEnemyY = null;
+    this.enemyVx = 0;
+    this.enemyVy = 0;
 
     // 卡住检测：从"开始想动"处锚定位置，持续想动却没挪窝就脱困
     this.movingTime = 0;     // 连续处于"想前进"状态的时长
@@ -189,25 +219,83 @@ export class AiController {
     const enemyPlayer = world.players.find((p) => p !== this.player && p.alive);
     if (!enemyPlayer) return idle;
     const enemy = enemyPlayer.tank;
-
-    this.fireTimer -= dt;
-    this.replanTimer -= dt;
-
-    // —— 0) 脱困机动优先：倒车 + 定向转，无视寻路与开火 ——
-    if (this.unstickTimer > 0) {
-      this.unstickTimer -= dt;
-      return { turn: this.unstickTurn, move: -1, fire: false };
-    }
-
-    const los = hasLineOfSight(self, enemy, world.maze.walls);
     const enemyDist = Math.hypot(enemy.x - self.x, enemy.y - self.y);
 
-    // —— 1) 躲弹优先于追击：选定逃生航向后锁 dodgeCommit 秒 ——
+    // 开火冷却流逝：敌人进近战圈后按倍速燃烧——节奏门是远距防狙神的，
+    // 不该拖累近战反应（贴脸刀战要能连发，冲脸途中也要烧掉残余冷却）
+    this.fireTimer -= dt * (enemyDist < AI.closeCombatRange ? AI.closeCooldownBoost : 1);
+    this.replanTimer -= dt;
+
+    // —— 0) 态势感知 + 攻防决策（脱困也要让位给反打，所以最先算）——
+    const los = hasLineOfSight(self, enemy, world.maze.walls);
+
+    // 敌速度估计：逐帧差分 + 指数平滑（差分太抖，平滑后约半拍收敛，
+    // 对方急转弯时旧速度残留几帧——这恰好是"人类预判也会被晃"的合理误差）
+    if (this.lastEnemyX !== null && dt > 0) {
+      const a = AI.leadSmooth;
+      this.enemyVx += ((enemy.x - this.lastEnemyX) / dt - this.enemyVx) * a;
+      this.enemyVy += ((enemy.y - this.lastEnemyY) / dt - this.enemyVy) * a;
+    }
+    this.lastEnemyX = enemy.x;
+    this.lastEnemyY = enemy.y;
+
+    // 拦截预判：解出子弹与敌人同时到达的拦截点，按难度 leadFactor 打折——
+    // 瞄准/开火全部对拦截点进行。打高速横移目标的"当前位置"是计算出的必失，
+    // 质量门会因此把这发省下来；对拦截点开的每一炮都是"算出来会中"的。
+    let aimX = enemy.x;
+    let aimY = enemy.y;
+    if (this.cfg.leadFactor > 0) {
+      const ti = interceptTime(
+        enemy.x - self.x, enemy.y - self.y,
+        this.enemyVx, this.enemyVy, BULLET.speed
+      );
+      if (ti !== null && ti < 2) { // 2 秒外的拦截解没有战术意义
+        aimX = enemy.x + this.enemyVx * ti * this.cfg.leadFactor;
+        aimY = enemy.y + this.enemyVy * ti * this.cfg.leadFactor;
+      }
+    }
+    const aimDist = Math.hypot(aimX - self.x, aimY - self.y);
+    const aimErr = normalizeAngle(
+      Math.atan2(aimY - self.y, aimX - self.x) - self.angle
+    );
+
+    // 弹药上限随交战距离：远距守预算纪律（防乱泼弹），近战放开到 maxAlive-1——
+    // 既能持续还手不被"弹全在外面飞十秒"饿死，又永远留一发膛内余量
+    // 等下一个必中窗口，不会一梭子清仓后干瞪眼
+    const ammoCap = enemyDist < AI.closeCombatRange
+      ? BULLET.maxAlive - 1
+      : this.cfg.ammoBudget;
+    let myShots = 0;
+    for (const b of world.bullets) {
+      if (!b.dead && b.owner === self) myShots++;
+    }
+    const gunReady = this.fireTimer <= 0 && myShots < ammoCap;
+
+    // 近战反打：贴脸 + 有视线 + 枪已就绪 → 压倒一切（中断躲避/脱困）转炮开火。
+    // 不设朝向门槛：躲弹时炮口本来就被闪避航向带偏，设了门槛就死锁在躲避态；
+    // 近距必中角大，转半圈也比闷头躲到死强。枪没就绪才专心躲弹等机会。
+    const counterAttack = los && gunReady && enemyDist < AI.closeCombatRange;
+
+    // —— 1) 脱困机动：倒车 + 定向转，可被反打抢占 ——
+    // 贴脸被对方顶住推不动是对撞的常态而非卡死，此时该开炮不该掉头
+    if (this.unstickTimer > 0) {
+      if (counterAttack) {
+        this.unstickTimer = 0; // 反打抢占，立即转入交战
+      } else {
+        this.unstickTimer -= dt;
+        return { turn: this.unstickTurn, move: -1, fire: false };
+      }
+    }
+
+    // —— 2) 躲弹：选定逃生航向后锁 dodgeCommit 秒 ——
     // 不锁的话脱靶向量随双方移动逐帧翻面，AI 会左右抽搐；
     // 锁定期内威胁消失也把机动做完（半途折返等于没躲）。
     let turn, move;
     this.dodgeTimer -= dt;
-    const threat = this.cfg.dodgeHorizon > 0 ? this.findThreat(self, world.bullets) : null;
+    if (counterAttack) this.dodgeTimer = 0; // 反打优先，中断进行中的闪避机动
+    const threat = !counterAttack && this.cfg.dodgeHorizon > 0
+      ? this.findThreat(self, world.bullets)
+      : null;
     if (threat && this.dodgeTimer <= 0) {
       this.dodgeHeading = pickDodgeHeading(
         self, world.bullets, world.maze.walls, this.cfg.dodgeHorizon
@@ -224,7 +312,7 @@ export class AiController {
       // 边追边连续还手就是最强进攻；撞上对方有坦克碰撞顶着，无碍
       let target;
       if (los) {
-        target = enemy;
+        target = { x: aimX, y: aimY }; // 追拦截点而非当前位置（lead pursuit，切角追击）
         this.path = []; // 直追时旧路径作废，下次失去视线再重算
       } else {
         if (this.replanTimer <= 0 || this.path.length === 0) {
@@ -248,7 +336,8 @@ export class AiController {
       move = Math.abs(diff) < AI.moveAngleGate ? 1 : 0;
 
       // —— 4) 卡住检测：连续想动 stuckWindow 秒却没挪出 stuckMinDist → 脱困 ——
-      if (move !== 0) {
+      // 反打期间不计入：贴脸被对方车体顶住推不动是交战常态，掉头就输了
+      if (move !== 0 && !counterAttack) {
         if (this.movingTime === 0) {
           this.anchorX = self.x; // 刚开始想动，锚定起点
           this.anchorY = self.y;
@@ -269,28 +358,16 @@ export class AiController {
     }
 
     // —— 5) 开火：像人一样打——三道门全过才扣扳机 ——
-    //   ① 节奏门：自身随机冷却（fireTimer），防机枪式倾泻
-    //   ② 弹药门：同屏自留弹 < ammoBudget，留弹防身/抓近身机会，
-    //      不一照面把 maxAlive 一梭子倒光
-    //   ③ 质量门：开火窗口 = 几何必中角 × 难度 aimSkill。必中角随距离
-    //      近大远小——贴脸 ±25° 都必中就别犹豫（近战反应快的关键），
-    //      远距离窗口自然收窄，杜绝朝大概方向乱泼弹
+    //   ① 节奏门 + ② 弹药门：已并入 gunReady（冷却就绪 + 自留弹未达上限）
+    //   ③ 质量门：开火窗口 = 几何必中角 × 难度 aimSkill，全部对拦截点评估。
+    //      必中角随距离近大远小；瞄的是预判落点，所以每发都是"算出来会中"
     let fire = false;
-    if (los && this.fireTimer <= 0) {
-      let myShots = 0;
-      for (const b of world.bullets) {
-        if (!b.dead && b.owner === self) myShots++;
-      }
-      if (myShots < this.cfg.ammoBudget) {
-        const hitTol = Math.atan2((TANK.radius + BULLET.radius) * AI.hitSlack, enemyDist);
-        const effTol = hitTol * this.cfg.aimSkill;
-        const aimDiff = normalizeAngle(
-          Math.atan2(enemy.y - self.y, enemy.x - self.x) - self.angle
-        );
-        if (Math.abs(aimDiff) < effTol) {
-          fire = true;
-          this.fireTimer = randRange(this.cfg.fireCooldown);
-        }
+    if (los && gunReady) {
+      const hitTol = Math.atan2((TANK.radius + BULLET.radius) * AI.hitSlack, aimDist);
+      const effTol = hitTol * this.cfg.aimSkill;
+      if (Math.abs(aimErr) < effTol) {
+        fire = true;
+        this.fireTimer = randRange(this.cfg.fireCooldown);
       }
     }
 
