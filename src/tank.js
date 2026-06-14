@@ -5,7 +5,7 @@
 // input.readControls，AI 来自 ai.js），坦克只消费指令不关心来源。
 // ============================================================
 
-import { TANK, BULLET } from "./config.js";
+import { TANK, BULLET, POWERUP, THEME } from "./config.js";
 import { resolveCircleWalls, segmentVsSegmentParam } from "./collision.js";
 import { Bullet } from "./bullet.js";
 
@@ -19,6 +19,12 @@ export class Tank {
     this.angle = angle;
     this.color = color;
     this.alive = true;
+    this.cooldown = 0;
+
+    // —— 道具状态（捡到道具时由 applyPowerup 设置；无道具时全为初值）——
+    this.scatterShots = 0;   // 剩余「扇形开火」次数，>0 时 tryFire 打扇形并递减
+    this.shield = false;     // 是否持有护盾（挡一次致命伤害）
+    this.shieldTimer = 0;    // 护盾剩余时间（秒），到点自动消失防一直龟
   }
 
   // dt: 距上一帧的秒数；walls: 墙线段数组，用于撞墙不穿
@@ -28,6 +34,16 @@ export class Tank {
 
     // 开炮冷却递减
     if (this.cooldown > 0) this.cooldown -= dt;
+
+    // 护盾限时流逝：到点自动消失（防止捡到盾就一直龟着不出来打）。
+    // 「挡一次伤害」的消耗在 main 的击中判定里做，两条触发先到先算。
+    if (this.shield) {
+      this.shieldTimer -= dt;
+      if (this.shieldTimer <= 0) {
+        this.shield = false;
+        this.shieldTimer = 0;
+      }
+    }
 
     // 转向：原地转
     this.angle += controls.turn * TANK.turnSpeed * dt;
@@ -48,29 +64,52 @@ export class Tank {
   }
 
   // 尝试开炮：wantFire 为 true + 冷却就绪 + 同屏己方子弹未达上限时，
-  // 从炮口生成一发子弹返回；否则返回 null。
+  // 从炮口生成子弹。返回「子弹数组」——普通单发是 [bullet]，散射是多发，
+  // 不开火/被限流是 []。（原先返回单个 Bullet 或 null，改数组以支持散射弹；
+  // 调用方 main 用展开 push 接住，对单发零成本。）
   // wantFire 即控制指令的 fire 位（人类是边沿触发，AI 自带开火节奏）。
   // bullets: 全局子弹数组，用于统计自己还有几发在场（实现 maxAlive 限流）——
   // 这是原版"靠子弹上限而非冷却限流"的核心，去掉固定冷却后尤其关键。
+  //   散射开火绕开 maxAlive：扇形是一次性集中火力（一炮多发），受限流会瞬间触顶
+  //   只发出一两发，扇形就废了。普通单发仍严格受限流，原版手感不变。
   // walls: 墙线段数组，用于贴墙出膛修正（防穿墙）。
   // 子弹的归属(owner)记为本坦克，便于"出膛宽限期"等判定。
-  // 返回的子弹由 main 收集进全局子弹数组统一管理。
   tryFire(bullets, wantFire, walls) {
-    if (!this.alive) return null;
-    if (this.cooldown > 0) return null;
-    if (!wantFire) return null;
+    if (!this.alive) return [];
+    if (this.cooldown > 0) return [];
+    if (!wantFire) return [];
 
-    // 同屏己方存活子弹数达上限则不发射
-    let mine = 0;
-    if (bullets) {
+    const scattering = this.scatterShots > 0;
+
+    // 同屏己方存活子弹数达上限则不发射（散射绕开：见上方注释）
+    if (!scattering && bullets) {
+      let mine = 0;
       for (const b of bullets) {
         if (b.owner === this && !b.dead) mine++;
       }
-      if (mine >= BULLET.maxAlive) return null;
+      if (mine >= BULLET.maxAlive) return [];
     }
 
     this.cooldown = BULLET.cooldown;
 
+    if (scattering) {
+      this.scatterShots--; // 消耗一次扇形开火机会，归零自动恢复单发
+      // 扇形：以朝向为中线，pellets 发按 spreadAngle 均匀铺开（奇数有正中那发）
+      const { pellets, spreadAngle } = POWERUP.scatter;
+      const out = [];
+      const mid = (pellets - 1) / 2;
+      for (let i = 0; i < pellets; i++) {
+        out.push(this.spawnBullet(this.angle + (i - mid) * spreadAngle, walls));
+      }
+      return out;
+    }
+
+    return [this.spawnBullet(this.angle, walls)];
+  }
+
+  // 沿给定 heading 生成一发子弹，含贴墙出膛修正（防穿墙）。
+  // 抽出来供单发 / 散射多发共用：每发各按自己的角度独立修正出膛点。
+  spawnBullet(heading, walls) {
     // 炮口位置：从车体中心沿朝向伸出（炮管末端再多探出一点，避免子弹生成在车体内被自己挡）
     const muzzleDist = TANK.bodyLength / 2 + TANK.barrelLength + BULLET.radius + 2;
 
@@ -80,8 +119,8 @@ export class Tank {
     // 压回后子弹下一帧即被墙反射，贴脸怼墙开炮会弹回来——原版同款自杀手感。
     let spawnDist = muzzleDist;
     if (walls && walls.length) {
-      const mx = this.x + Math.cos(this.angle) * muzzleDist;
-      const my = this.y + Math.sin(this.angle) * muzzleDist;
+      const mx = this.x + Math.cos(heading) * muzzleDist;
+      const my = this.y + Math.sin(heading) * muzzleDist;
       for (const w of walls) {
         const t = segmentVsSegmentParam(this.x, this.y, mx, my, w.x1, w.y1, w.x2, w.y2);
         if (t !== null) {
@@ -90,12 +129,21 @@ export class Tank {
       }
     }
 
-    const bx = this.x + Math.cos(this.angle) * spawnDist;
-    const by = this.y + Math.sin(this.angle) * spawnDist;
-    const vx = Math.cos(this.angle) * BULLET.speed;
-    const vy = Math.sin(this.angle) * BULLET.speed;
-
+    const bx = this.x + Math.cos(heading) * spawnDist;
+    const by = this.y + Math.sin(heading) * spawnDist;
+    const vx = Math.cos(heading) * BULLET.speed;
+    const vy = Math.sin(heading) * BULLET.speed;
     return new Bullet(bx, by, vx, vy, this);
+  }
+
+  // 拾取道具：按类型设置对应状态。散射叠加开火次数，护盾刷新一层 + 重置计时。
+  applyPowerup(type) {
+    if (type === "scatter") {
+      this.scatterShots += POWERUP.scatter.shots;
+    } else if (type === "shield") {
+      this.shield = true;
+      this.shieldTimer = POWERUP.shield.duration;
+    }
   }
 
   render(ctx) {
@@ -167,6 +215,26 @@ export class Tank {
     ctx.stroke();
 
     ctx.restore();
+
+    // —— 护盾环（持有护盾时，套在车体外的旋转虚线光环）——
+    // 单独一段：只平移不旋转，让光环动画与车头朝向解耦（环跟着车走但自转）。
+    // 旋转用 lineDashOffset 随 shieldTimer 推进；快到期时（<1.5s）闪烁提示即将消失。
+    if (this.shield) {
+      const blink = this.shieldTimer < 1.5 ? 0.4 + 0.4 * Math.abs(Math.sin(this.shieldTimer * 8)) : 0.8;
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.globalAlpha = blink;
+      ctx.strokeStyle = THEME.shieldRing;
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([6, 5]);
+      ctx.lineDashOffset = -this.shieldTimer * 18; // 负值 → 顺时针流动
+      ctx.beginPath();
+      ctx.arc(0, 0, TANK.radius + 6, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);       // 复位虚线，别污染后续绘制
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    }
   }
 
   // 把车体色压暗，作为炮塔颜色（让炮塔与车体同色系但有层次）

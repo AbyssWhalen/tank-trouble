@@ -159,10 +159,13 @@ export const AI = {
 //   leadFactor     拦截预判提前量比例：0 = 打当前位置（简单档老实人），
 //                  1 = 全量提前（打"你将到的位置"）。这是"精密计算"的核心——
 //                  打高速横移目标的当前位置是计算出的必失，AI 会忍住不浪费那发
+//   powerupRange   道具感知半径（格）：只有这范围内、且对自己有用的道具才会去捡。
+//                  优先级低于躲弹/反打（不为道具送命或放跑人头），高于纯追敌。
+//                  简单档 0=完全不主动捡、普通 4=保守安全时捡、困难 7=激进主动抢
 export const AI_DIFFICULTY = {
-  easy:   { label: "简单", aimSkill: 2.0, fireCooldown: [1.0, 1.8],   replanInterval: 0.7,  dodgeHorizon: 0,    dodgeMargin: 0,  ammoBudget: 2, leadFactor: 0 },
-  normal: { label: "普通", aimSkill: 1.5, fireCooldown: [0.7, 1.4],   replanInterval: 0.55, dodgeHorizon: 0.35, dodgeMargin: 4,  ammoBudget: 2, leadFactor: 0.6 },
-  hard:   { label: "困难", aimSkill: 0.9, fireCooldown: [0.25, 0.55], replanInterval: 0.25, dodgeHorizon: 0.9,  dodgeMargin: 14, ammoBudget: 3, leadFactor: 1.0 },
+  easy:   { label: "简单", aimSkill: 2.0, fireCooldown: [1.0, 1.8],   replanInterval: 0.7,  dodgeHorizon: 0,    dodgeMargin: 0,  ammoBudget: 2, leadFactor: 0,   powerupRange: 0 },
+  normal: { label: "普通", aimSkill: 1.5, fireCooldown: [0.7, 1.4],   replanInterval: 0.55, dodgeHorizon: 0.35, dodgeMargin: 4,  ammoBudget: 2, leadFactor: 0.6, powerupRange: 4 },
+  hard:   { label: "困难", aimSkill: 0.9, fireCooldown: [0.25, 0.55], replanInterval: 0.25, dodgeHorizon: 0.9,  dodgeMargin: 14, ammoBudget: 3, leadFactor: 1.0, powerupRange: 7 },
 };
 
 // 墙体渲染
@@ -182,6 +185,26 @@ export const VIEWPORT_PADDING = {
   left: 18,
 };
 
+// 道具系统（菜单可开关）。道具在地图随机刷新，坦克碾过即捡取。
+// 两种：scatter 散射弹（一炮变扇形多发，给若干次开火机会）、
+//       shield 护盾（挡一次致命伤害，或限时自动消失，先到先算）。
+// 效果全作用在 tank 状态上，控制指令 {turn,move,fire} 不变 → AI 自动受益、无需特判。
+export const POWERUP = {
+  spawnInterval: [6, 10], // 距上次刷新多久再刷（秒，随机区间）
+  maxOnField: 2,          // 场上同时最多几个道具
+  radius: 16,             // 拾取圈半径（≈坦克半径，碾过即吃）
+  types: ["scatter", "shield"], // 可刷新的种类（菜单关掉则整局不刷）
+
+  scatter: {
+    shots: 3,             // 捡一次给几次「扇形开火」机会
+    pellets: 3,           // 每次扇形几发（奇数才有正中那发）
+    spreadAngle: 0.26,    // 相邻两发夹角（弧度，≈15°）
+  },
+  shield: {
+    duration: 5,          // 护盾最长持续（秒），到点自动消失防一直龟
+  },
+};
+
 // ============================================================
 // 主题配色（浅色风，参考原版 Tank Trouble）
 // UI 颜色集中此处，render 只引用、不写死，方便整体调色。
@@ -199,10 +222,14 @@ export const THEME = {
   textMain: "#2b2b33",   // 主文字（深炭灰）
   textDim: "#9a9aa5",    // 次要/提示文字
 
+  // 主题色（游戏感强调色）
+  accent: "#2a5a8a",     // 深蓝（按钮选中、hover、强调元素）
+  accentLight: "#4a7ab0",// 浅蓝（hover 时的渐变或边框）
+
   // 菜单
   title: "#2b2b33",      // 标题色
   btnFill: "#ffffff",    // 按钮底（白）
-  btnFillHover: "#2b2b33",// 悬停反色
+  btnFillHover: "#2a5a8a",// 悬停反色改用主题色
   btnTextHover: "#ffffff",
   btnBorder: "#2b2b33",
   btnDisabledFill: "#ededf0",
@@ -211,4 +238,11 @@ export const THEME = {
 
   // 结算遮罩
   overlay: "rgba(232,232,236,0.82)", // 浅色半透明压层（深色遮罩在浅底上太突兀）
+
+  // 道具（地上的拾取物 + 坦克身上的护盾环）
+  powScatterBg: "#e9a200", // 散射弹底色（暖橙，地面上够跳）
+  powShieldBg: "#2bb3c4",  // 护盾道具底色（青蓝）
+  powIcon: "#ffffff",      // 道具图标线条（白，压在底色上）
+  powRing: "#2b2b33",      // 道具圆底描边
+  shieldRing: "#3ad4e8",   // 坦克护盾光环色（半透明在 render 里加）
 };

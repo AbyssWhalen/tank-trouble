@@ -187,6 +187,7 @@ export class AiController {
     this.cfg = AI_DIFFICULTY[level] || AI_DIFFICULTY.normal; // 容错兜底普通档
 
     this.path = [];          // 待走的格子序列，[0] 是下一个路点
+    this.pathGoalCell = null; // 当前路径的终点格（追敌/捡道具切换时变了就强制重算）
     this.replanTimer = 0;    // 归零触发 BFS 重算（敌我都在动，路径很快过期）
     this.fireTimer = randRange(this.cfg.fireCooldown); // 开局先压一拍，不秒开枪
 
@@ -221,9 +222,27 @@ export class AiController {
     const enemy = enemyPlayer.tank;
     const enemyDist = Math.hypot(enemy.x - self.x, enemy.y - self.y);
 
-    // 开火冷却流逝：敌人进近战圈后按倍速燃烧——节奏门是远距防狙神的，
-    // 不该拖累近战反应（贴脸刀战要能连发，冲脸途中也要烧掉残余冷却）
-    this.fireTimer -= dt * (enemyDist < AI.closeCombatRange ? AI.closeCooldownBoost : 1);
+    // —— 敌人道具状态识别 + 自己道具状态：决定整体策略 ——
+    const enemyHasShield = enemy.shield;              // 敌人有无敌护盾
+    const enemyShieldExpiring = enemy.shieldTimer < 1.5; // 护盾快到期（<1.5s 闪烁）
+    const enemyHasScatter = enemy.scatterShots > 0;   // 敌人有散射弹（火力密集）
+
+    const selfHasShield = self.shield;                // 自己有护盾
+    const selfShieldExpiring = self.shieldTimer < 1.5; // 自己护盾快到期
+
+    // 策略决策：
+    //   自己有护盾（且未快到期）→ 狂暴模式：直接冲锋、不躲弹、放开火力、不捡道具（时间宝贵）
+    //   敌人有护盾（且未快到期）→ 避战模式：不反打、优先捡道具/等护盾消失
+    //   敌人有散射 → 防守模式：加强躲避、减少激进追击
+    const berserkMode = selfHasShield && !selfShieldExpiring;  // 狂暴：利用无敌冲锋
+    const avoidMode = enemyHasShield && !enemyShieldExpiring; // 避战：等护盾消失
+    const defensiveMode = enemyHasScatter;                    // 防守：应对散射威胁
+
+    // 开火冷却流逝：近战圈/狂暴模式按倍速燃烧（快速连发）
+    // 避战模式不加速（不急着开火）
+    const cooldownBoost = avoidMode ? 1
+      : (berserkMode || enemyDist < AI.closeCombatRange ? AI.closeCooldownBoost : 1);
+    this.fireTimer -= dt * cooldownBoost;
     this.replanTimer -= dt;
 
     // —— 0) 态势感知 + 攻防决策（脱困也要让位给反打，所以最先算）——
@@ -274,7 +293,11 @@ export class AiController {
     // 近战反打：贴脸 + 有视线 + 枪已就绪 → 压倒一切（中断躲避/脱困）转炮开火。
     // 不设朝向门槛：躲弹时炮口本来就被闪避航向带偏，设了门槛就死锁在躲避态；
     // 近距必中角大，转半圈也比闷头躲到死强。枪没就绪才专心躲弹等机会。
-    const counterAttack = los && gunReady && enemyDist < AI.closeCombatRange;
+    // 特殊情况：
+    //   - 狂暴模式（自己有护盾）：放宽反打距离到中距，主动进攻
+    //   - 避战模式（敌人有护盾未到期）：禁用反打——打了也白打
+    const counterAttackRange = berserkMode ? AI.closeCombatRange * 1.5 : AI.closeCombatRange;
+    const counterAttack = !avoidMode && los && gunReady && enemyDist < counterAttackRange;
 
     // —— 1) 脱困机动：倒车 + 定向转，可被反打抢占 ——
     // 贴脸被对方顶住推不动是对撞的常态而非卡死，此时该开炮不该掉头
@@ -290,10 +313,11 @@ export class AiController {
     // —— 2) 躲弹：选定逃生航向后锁 dodgeCommit 秒 ——
     // 不锁的话脱靶向量随双方移动逐帧翻面，AI 会左右抽搐；
     // 锁定期内威胁消失也把机动做完（半途折返等于没躲）。
+    // 狂暴模式（自己有护盾）：完全不躲弹，直接冲锋（无敌状态）
     let turn, move;
     this.dodgeTimer -= dt;
-    if (counterAttack) this.dodgeTimer = 0; // 反打优先，中断进行中的闪避机动
-    const threat = !counterAttack && this.cfg.dodgeHorizon > 0
+    if (counterAttack || berserkMode) this.dodgeTimer = 0; // 反打/狂暴优先，中断闪避
+    const threat = !counterAttack && !berserkMode && this.cfg.dodgeHorizon > 0
       ? this.findThreat(self, world.bullets)
       : null;
     if (threat && this.dodgeTimer <= 0) {
@@ -307,17 +331,86 @@ export class AiController {
       this.path = [];        // 闪避破坏走位，旧路径作废，威胁解除后重算
       this.movingTime = 0;   // 闪避不计入卡住检测（被弹幕压在墙角不算卡）
     } else {
-      // —— 2) 追击：选目标点（有视线直追本体，没视线走 BFS 路点）——
+      // —— 3) 追击 / 捡道具 / 战术撤退：根据自己和敌人的道具状态选策略 ——
+
+      let powerupTarget = null;
+      let goal, goalLos;
+
+      if (berserkMode) {
+        // 狂暴模式（自己有护盾）：5 秒无敌，直接冲锋不捡道具（时间宝贵）
+        goal = enemy;
+        goalLos = los;
+      } else if (avoidMode) {
+        // 避战模式（敌人有护盾）：优先捡道具提升实力，没道具就保持安全距离游走
+        powerupTarget = this.pickPowerupTarget(self, world.powerups, world, true); // 放宽限制
+        if (powerupTarget) {
+          goal = powerupTarget;
+          goalLos = !segmentHitsWalls(self.x, self.y, goal.x, goal.y, world.maze.walls);
+        } else {
+          // 没道具可捡：保持距离游走（不主动靠近送死，也不硬后撤撞墙）
+          // 策略：距离 <4 格时远离（BFS 到对面），距离够远时原地游走等护盾消失
+          if (enemyDist < CELL_SIZE * 4) {
+            // 太近：选一个远离敌人的目标格（敌人对面方向，地图对角）
+            const enemyCell = cellOf(enemy, world.maze);
+            const awayC = Math.floor(world.maze.cols - 1 - enemyCell.c); // 水平对面
+            const awayR = Math.floor(world.maze.rows - 1 - enemyCell.r); // 垂直对面
+            goal = cellCenter({ c: awayC, r: awayR });
+            goalLos = false; // 用 BFS 绕路，不撞墙
+          } else {
+            // 距离够远：原地小幅游走，别傻站着（随机偏移一点，保持移动）
+            const randomAngle = Math.random() * Math.PI * 2;
+            goal = {
+              x: self.x + Math.cos(randomAngle) * CELL_SIZE * 1.5,
+              y: self.y + Math.sin(randomAngle) * CELL_SIZE * 1.5
+            };
+            goalLos = false; // 用 BFS 绕墙
+          }
+        }
+      } else if (defensiveMode && enemyDist < CELL_SIZE * 3.5) {
+        // 防守模式 + 距离太近（<3.5 格）：优先捡道具提升火力，没道具才考虑拉距离
+        powerupTarget = this.pickPowerupTarget(self, world.powerups, world, false);
+        if (powerupTarget) {
+          goal = powerupTarget;
+          goalLos = !segmentHitsWalls(self.x, self.y, goal.x, goal.y, world.maze.walls);
+        } else {
+          // 太近且没道具：正常追击但保持谨慎（靠减少开火 + 加强躲避来防守）
+          goal = enemy;
+          goalLos = los;
+        }
+      } else {
+        // 正常模式：优先级 反打贴脸>道具>追敌
+        powerupTarget = !counterAttack
+          ? this.pickPowerupTarget(self, world.powerups, world, false)
+          : null;
+        goal = powerupTarget || enemy;
+        goalLos = powerupTarget
+          ? !segmentHitsWalls(self.x, self.y, goal.x, goal.y, world.maze.walls)
+          : los;
+      }
+
       // 近战不需要特殊机动：必中角近大远小，贴脸时开火窗口极宽，
       // 边追边连续还手就是最强进攻；撞上对方有坦克碰撞顶着，无碍
       let target;
-      if (los) {
-        target = { x: aimX, y: aimY }; // 追拦截点而非当前位置（lead pursuit，切角追击）
-        this.path = []; // 直追时旧路径作废，下次失去视线再重算
+      if (goalLos) {
+        // 有视线：道具直追其位置；后撤点/敌人分别处理
+        if (powerupTarget) {
+          target = { x: goal.x, y: goal.y };        // 道具：直追
+        } else if (goal === enemy) {
+          target = { x: aimX, y: aimY };            // 追敌：拦截点（lead pursuit）
+        } else {
+          target = { x: goal.x, y: goal.y };        // 后撤点：直接走向目标点
+        }
+        this.path = [];          // 直追时旧路径作废
+        this.pathGoalCell = null;
       } else {
-        if (this.replanTimer <= 0 || this.path.length === 0) {
+        const goalCell = cellOf(goal, world.maze);
+        // 目标格变了（追敌↔捡道具切换，或敌人/道具换格）→ 强制重算，别拿旧路径跑错地方
+        const goalChanged = !this.pathGoalCell
+          || this.pathGoalCell.c !== goalCell.c || this.pathGoalCell.r !== goalCell.r;
+        if (this.replanTimer <= 0 || this.path.length === 0 || goalChanged) {
           this.replanTimer = this.cfg.replanInterval;
-          this.path = findPath(world.maze, cellOf(self, world.maze), cellOf(enemy, world.maze));
+          this.path = findPath(world.maze, cellOf(self, world.maze), goalCell);
+          this.pathGoalCell = goalCell;
         }
         // 走到路点格中心附近就弹出，奔向下一个（while：一帧可能跨过多个）
         while (this.path.length > 0) {
@@ -325,11 +418,11 @@ export class AiController {
           if (Math.hypot(wp.x - self.x, wp.y - self.y) > CELL_SIZE * 0.3) break;
           this.path.shift();
         }
-        // 路径走完/不可达兜底：直接朝敌人本体怼（撞墙滑动 + 卡住脱困能兜住）
-        target = this.path.length > 0 ? cellCenter(this.path[0]) : enemy;
+        // 路径走完/不可达兜底：直接朝目标本体怼（撞墙滑动 + 卡住脱困能兜住）
+        target = this.path.length > 0 ? cellCenter(this.path[0]) : goal;
       }
 
-      // —— 3) 转向 + 前进：取最短旋转方向，大致对准才走 ——
+      // —— 4) 转向 + 前进：取最短旋转方向，大致对准才走 ——
       const desired = Math.atan2(target.y - self.y, target.x - self.x);
       const diff = normalizeAngle(desired - self.angle);
       turn = Math.abs(diff) > 0.05 ? Math.sign(diff) : 0; // 小死区防抖
@@ -361,10 +454,17 @@ export class AiController {
     //   ① 节奏门 + ② 弹药门：已并入 gunReady（冷却就绪 + 自留弹未达上限）
     //   ③ 质量门：开火窗口 = 几何必中角 × 难度 aimSkill，全部对拦截点评估。
     //      必中角随距离近大远小；瞄的是预判落点，所以每发都是"算出来会中"
+    //   特殊情况：
+    //     - 狂暴模式（自己有护盾）：放宽窗口 1.5 倍，激进开火
+    //     - 避战模式（敌人有护盾）：完全不开火——打了也白打
+    //     - 防守模式（敌人有散射）：缩小窗口 40%，更谨慎
     let fire = false;
-    if (los && gunReady) {
+    if (!avoidMode && los && gunReady) { // 避战模式禁止开火
       const hitTol = Math.atan2((TANK.radius + BULLET.radius) * AI.hitSlack, aimDist);
-      const effTol = hitTol * this.cfg.aimSkill;
+      let skillMod = this.cfg.aimSkill;
+      if (berserkMode) skillMod *= 1.5;         // 狂暴：放宽窗口，多打
+      else if (defensiveMode) skillMod *= 0.6;  // 防守：缩小窗口，更谨慎
+      const effTol = hitTol * skillMod;
       if (Math.abs(aimErr) < effTol) {
         fire = true;
         this.fireTimer = randRange(this.cfg.fireCooldown);
@@ -395,5 +495,89 @@ export class AiController {
       if (!best || t < best.t) best = { b, t, mx, my };   // 盯最急的那颗
     }
     return best;
+  }
+
+  // 选一个值得去捡的道具：在感知范围内、对自己有用、且安全可达的道具里挑一个。
+  // 返回 {x,y,type} 或 null（没有合适的 → 上层照常追敌）。
+  //
+  // 多层过滤防"送死捡道具"：
+  //   ① 有用性：已有护盾/散射有库存 → 不捡对应类型
+  //   ② 范围：超出 powerupRange → 不看（按难度 0/4/7 格：简单不捡、普通保守、困难激进）
+  //   ③ 安全性（按难度分级）：
+  //      - 简单档：完全不主动捡（powerupRange=0 天然跳过）
+  //      - 普通档：保守——必须「附近无弹幕威胁 且 敌人远或无视线」才捡，否则放弃
+  //      - 困难档：激进——会权衡收益，盾/散射值得冒一定风险；但弹幕逼脸时仍放弃
+  //   ④ 选最近：多个候选时就近，顺路不绕远
+  //
+  // relaxed: 避战模式放宽限制（敌人有护盾时 AI 需要道具提升实力，安全检查更宽松）
+  pickPowerupTarget(self, powerups, world, relaxed = false) {
+    if (!powerups || powerups.length === 0) return null;
+    const range = this.cfg.powerupRange * CELL_SIZE;
+    if (range <= 0) return null; // 简单档 powerupRange=0，天然不捡
+
+    // 找敌人（用于安全评估"敌人能拦截吗"）
+    const enemyPlayer = world.players.find((p) => p !== this.player && p.alive);
+    if (!enemyPlayer) return null; // 敌人已死，不用抢道具了
+    const enemy = enemyPlayer.tank;
+
+    let best = null;
+    let bestDist = Infinity;
+
+    for (const p of powerups) {
+      if (p.taken) continue;
+
+      // ① 有用性：盾在身上不重复捡；散射有库存就先用掉再说
+      if (p.type === "shield" && self.shield) continue;
+      if (p.type === "scatter" && self.scatterShots > 0) continue;
+
+      const d = Math.hypot(p.x - self.x, p.y - self.y);
+      if (d > range) continue; // ② 超出感知范围
+
+      // ③ 安全性评估（按难度分级，relaxed 时放宽）
+      if (!this.isPowerupSafe(self, p, enemy, world, relaxed)) continue;
+
+      if (d < bestDist) { // ④ 取最近
+        bestDist = d;
+        best = p;
+      }
+    }
+    return best;
+  }
+
+  // 判断去捡道具 pw 是否安全（普通档保守、困难档激进）
+  // relaxed: 避战模式放宽限制（敌人有护盾，AI 需要道具提升实力，安全检查更宽松）
+  isPowerupSafe(self, pw, enemy, world, relaxed = false) {
+    const cfg = this.cfg;
+
+    // 困难档：激进策略——只要弹幕不是逼到脸上就敢冲（盾/散射收益大）
+    if (cfg.label === "困难") {
+      // 道具方向有逼近的子弹 且 <1 秒内会命中 → 太危险，放弃
+      const threat = this.findThreat(self, world.bullets);
+      if (threat && threat.t < 1.0) {
+        // 检查威胁方向是否与道具方向夹角 <60°（冲向道具会撞子弹）
+        const toThreat = Math.atan2(threat.my - self.y, threat.mx - self.x);
+        const toPowerup = Math.atan2(pw.y - self.y, pw.x - self.x);
+        let diff = Math.abs(toThreat - toPowerup);
+        if (diff > Math.PI) diff = Math.PI * 2 - diff;
+        if (diff < Math.PI / 3) return false; // 夹角 <60°，冲过去会撞子弹
+      }
+      return true; // 其他情况都敢冲
+    }
+
+    // 普通档：保守策略——必须两条都满足才捡（relaxed 时放宽）
+    //   A. 附近无弹幕威胁（1.5 秒内不会被子弹命中）
+    //   B. 敌人无法拦截（距离远 >6 格 OR 无视线守株待兔）
+    // relaxed 模式（避战时）：只要没有迫在眉睫的弹幕威胁（<0.8 秒）就敢捡，忽略敌人距离
+    const threat = this.findThreat(self, world.bullets);
+    const threatLimit = relaxed ? 0.8 : 1.5;
+    if (threat && threat.t < threatLimit) return false; // A 不满足：附近有弹幕
+
+    if (!relaxed) {
+      const distToEnemy = Math.hypot(enemy.x - pw.x, enemy.y - pw.y);
+      const hasLos = !segmentHitsWalls(enemy.x, enemy.y, pw.x, pw.y, world.maze.walls);
+      if (distToEnemy < CELL_SIZE * 6 && hasLos) return false; // B 不满足：敌人近且有视线能守株待兔
+    }
+
+    return true; // 都满足，安全
   }
 }

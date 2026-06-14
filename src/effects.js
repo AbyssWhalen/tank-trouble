@@ -3,11 +3,12 @@
 // 阶段 6 起：坦克被击破的爆炸——参考原版 Tank Trouble 的死亡演出：
 //   烟团：中心几个深色圆斑错位叠放，持续膨胀 + 淡出
 //   碎片：若干随机多边形"残骸"四散飞出，自旋 + 阻尼减速 + 淡出
+// 道具系统起：PickupFlash 拾取闪光、ShieldBreak 破盾——都是一次性扩散环。
 // 纯表现层：不参与碰撞，不影响物理；done 后由 main 从数组移除。
 // 联机 v2 直接复用：死亡有反馈而非凭空消失。
 // ============================================================
 
-import { EXPLOSION } from "./config.js";
+import { EXPLOSION, THEME, TANK } from "./config.js";
 
 // [min, max] 区间取随机数
 function randRange([min, max]) {
@@ -132,5 +133,107 @@ export class TankExplosion {
 
     ctx.restore();
     ctx.globalAlpha = 1; // 复位，别污染后续绘制
+  }
+}
+
+// ============================================================
+// PickupFlash — 拾取道具时的一圈快速扩散彩环（~0.3s）
+// 轻量提示「这里捡到了东西」，颜色按道具类型取（散射橙 / 护盾青）。
+// ============================================================
+export class PickupFlash {
+  // x, y: 拾取位置；type: "scatter" | "shield"（决定环色）
+  constructor(x, y, type) {
+    this.x = x;
+    this.y = y;
+    this.color = type === "scatter" ? THEME.powScatterBg : THEME.powShieldBg;
+    this.age = 0;
+    this.duration = 0.3;
+  }
+
+  get done() {
+    return this.age >= this.duration;
+  }
+
+  update(dt) {
+    this.age += dt;
+  }
+
+  render(ctx) {
+    if (this.done) return;
+    const p = this.age / this.duration;
+    // 环半径从坦克尺寸快速扩到 ~2.5 倍，同时淡出
+    const r = TANK.radius * (0.8 + p * 1.7);
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.globalAlpha = 1 - p;
+    ctx.strokeStyle = this.color;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+}
+
+// ============================================================
+// ShieldBreak — 护盾挡下一发时的破碎特效（~0.4s）
+// 一圈炸开的光环 + 几片向外飞的弧形碎光，告诉玩家「盾碎了，这下没保护了」。
+// ============================================================
+export class ShieldBreak {
+  // x, y: 坦克位置；color: 护盾环色（与 tank 上的护盾环同色，视觉连贯）
+  constructor(x, y, color) {
+    this.x = x;
+    this.y = y;
+    this.color = color;
+    this.age = 0;
+    this.duration = 0.4;
+    // 几片碎光：均匀分布的弧段，向外飞 + 淡出
+    this.shards = [];
+    const n = 8;
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2 + Math.random() * 0.3;
+      this.shards.push({ a, speed: 70 + Math.random() * 50 });
+    }
+  }
+
+  get done() {
+    return this.age >= this.duration;
+  }
+
+  update(dt) {
+    this.age += dt;
+  }
+
+  render(ctx) {
+    if (this.done) return;
+    const p = this.age / this.duration;
+    const alpha = 1 - p;
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = this.color;
+
+    // —— 1) 炸开的光环：半径快速扩张 ——
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, (TANK.radius + 6) * (1 + p * 0.8), 0, Math.PI * 2);
+    ctx.stroke();
+
+    // —— 2) 碎光：每片是一小段弧，沿各自方向向外飞 ——
+    ctx.lineWidth = 2;
+    const baseR = TANK.radius + 6;
+    for (const s of this.shards) {
+      const dist = baseR + s.speed * this.age;
+      const cx = Math.cos(s.a) * dist;
+      const cy = Math.sin(s.a) * dist;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 3.5, s.a - 0.6, s.a + 0.6);
+      ctx.stroke();
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.restore();
   }
 }
