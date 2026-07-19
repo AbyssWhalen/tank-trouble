@@ -27,12 +27,13 @@ import { TankExplosion, PickupFlash } from "./effects.js";
 import { PowerupSpawner } from "./powerup.js";
 import {
   isJustPressed, endFrame,
-  bindMouse, getMousePos, isClicked,
+  bindMouse, getMousePos, isClicked, getAnyJustPressed,
 } from "./input.js";
 import {
   renderMenu, renderPauseOverlay, renderHud, renderRoundOverBanner,
-  menuAction, pauseAction,
+  renderRebindOverlay, menuAction, pauseAction, rebindAction, keyLabel,
 } from "./ui.js";
+import { initSettings, saveBindings, resetBindings } from "./settings.js";
 
 const canvas = document.getElementById("game-canvas");
 const ctx = canvas.getContext("2d");
@@ -63,6 +64,9 @@ window.addEventListener("resize", setupCanvas);
 
 bindMouse(canvas);
 
+// 启动时套用持久化设置（键位覆写 KEY_BINDINGS 前两套，重启不丢）
+initSettings();
+
 // —— 游戏状态机 ——
 const STATE = { MENU: "menu", PLAYING: "playing", PAUSED: "paused", ROUND_OVER: "round_over" };
 let state = STATE.MENU;
@@ -87,6 +91,11 @@ let roundOverTimer = 0;        // ROUND_OVER 倒计时（秒），归零自动�
 let aiLevel = "normal";        // 选中的 AI 难度档（菜单 chip 单选），开局/R 重开沿用
 let powerupsOn = true;         // 道具开关（菜单 toggle），开局/R 重开沿用
 let showHelp = false;          // 玩法说明浮窗是否显示（叠在菜单上的浮层）
+
+// —— 键位设置面板状态（菜单子状态）——
+// capturing 非空表示等待玩家按下新键；conflictMsg 是面板内的红字提示（限时消失）
+const rebind = { open: false, capturing: null, conflictMsg: "", msgTimer: 0 };
+const RESERVED_KEYS = ["Escape", "F11"]; // 系统语义键，禁止绑定（Esc=暂停/取消，F11=全屏）
 
 // 开一整场：从菜单进入时调用。清零累计分，再开第一回合。
 // 与 setupRound 的分工：startMatch 负责「整场」级状态(分数)，
@@ -151,7 +160,7 @@ function loop(now) {
 function update(dt) {
   switch (state) {
     case STATE.MENU:
-      updateMenu();
+      updateMenu(dt);
       break;
     case STATE.PLAYING:
       updatePlaying(dt);
@@ -166,8 +175,14 @@ function update(dt) {
   endFrame();
 }
 
-// 菜单：把点击交给 ui.menuAction 判定「点到了什么」，这里只做状态变更
-function updateMenu() {
+// 菜单：把点击交给 ui.menuAction 判定「点到了什么」，这里只做状态变更。
+// 键位面板打开时整个菜单交互移交 updateRebind（面板是独占浮层）。
+function updateMenu(dt) {
+  if (rebind.open) {
+    updateRebind(dt);
+    return;
+  }
+
   if (!isClicked()) return;
   const { x: mx, y: my } = getMousePos();
   const action = menuAction(mx, my, { showHelp });
@@ -180,6 +195,9 @@ function updateMenu() {
     case "openHelp":
       showHelp = true;
       break;
+    case "openRebind":
+      rebind.open = true;
+      break;
     case "aiLevel":
       aiLevel = action.key;
       break;
@@ -190,6 +208,80 @@ function updateMenu() {
       startMatch(action.mode);
       break;
   }
+}
+
+// 键位设置面板：捕获按键 → 校验（保留键/冲突）→ 写入 KEY_BINDINGS + 存盘。
+// 交互规则：点 chip 进捕获态；捕获态按 Esc 只取消捕获；非捕获态 Esc 关面板。
+function updateRebind(dt) {
+  // 红字提示限时消失
+  if (rebind.msgTimer > 0) {
+    rebind.msgTimer -= dt;
+    if (rebind.msgTimer <= 0) rebind.conflictMsg = "";
+  }
+  const flash = (msg) => {
+    rebind.conflictMsg = msg;
+    rebind.msgTimer = 2.2;
+  };
+
+  // 1) 捕获态：吃掉本帧按下的第一个键
+  if (rebind.capturing) {
+    const code = getAnyJustPressed();
+    if (code) {
+      const { player, action } = rebind.capturing;
+      if (code === "Escape") {
+        rebind.capturing = null; // 仅取消捕获，不关面板
+      } else if (RESERVED_KEYS.includes(code)) {
+        flash(`${keyLabel(code)} 是系统保留键，不能绑定`);
+        rebind.capturing = null;
+      } else if (code === KEY_BINDINGS[player][action]) {
+        rebind.capturing = null; // 绑回原键，无事发生
+      } else {
+        // 冲突检测：与前两套键位的任何动作重复即拒绝
+        const conflict = findBindingConflict(code);
+        if (conflict) {
+          flash(`${keyLabel(code)} 已被 玩家${conflict.player + 1} 的「${conflict.label}」占用`);
+          rebind.capturing = null;
+        } else {
+          KEY_BINDINGS[player][action] = code;
+          saveBindings();
+          rebind.capturing = null;
+        }
+      }
+      return;
+    }
+  } else if (isJustPressed("Escape")) {
+    // 2) 非捕获态 Esc：关闭面板
+    rebind.open = false;
+    return;
+  }
+
+  // 3) 鼠标点击：chip 进入/切换捕获，恢复默认，面板外关闭
+  if (!isClicked()) return;
+  const { x: mx, y: my } = getMousePos();
+  const action = rebindAction(mx, my);
+  if (!action) return;
+
+  if (action.type === "bind") {
+    rebind.capturing = { player: action.player, action: action.action };
+  } else if (action.type === "reset") {
+    resetBindings();
+    rebind.capturing = null;
+    flash("已恢复默认键位");
+  } else if (action.type === "close") {
+    rebind.open = false;
+    rebind.capturing = null;
+  }
+}
+
+// code 是否已被前两套键位占用，返回 { player, label }（动作中文名）或 null
+function findBindingConflict(code) {
+  const labels = { forward: "前进", back: "后退", left: "左转", right: "右转", fire: "开火" };
+  for (let p = 0; p < 2; p++) {
+    for (const [action, label] of Object.entries(labels)) {
+      if (KEY_BINDINGS[p][action] === code) return { player: p, label };
+    }
+  }
+  return null;
 }
 
 function updatePlaying(dt) {
@@ -341,6 +433,13 @@ function render() {
   switch (state) {
     case STATE.MENU:
       renderMenu(ctx, { mouse: getMousePos(), aiLevel, powerupsOn, showHelp });
+      if (rebind.open) {
+        renderRebindOverlay(ctx, {
+          mouse: getMousePos(),
+          capturing: rebind.capturing,
+          conflictMsg: rebind.conflictMsg,
+        });
+      }
       break;
     case STATE.PLAYING:
       renderArena();

@@ -46,6 +46,38 @@ const powupChips = powChipKeys.map((on, i) => ({
 // —— 玩法说明按钮（右下角圆形 "?" 按钮，点开浮窗）——
 const helpBtn = { x: CANVAS.width - 56, y: CANVAS.height - 56, r: 20 };
 
+// —— 键位设置按钮（左下角圆形按钮，与右下 "?" 对称）——
+const rebindBtn = { x: 56, y: CANVAS.height - 56, r: 20 };
+
+// —— 键位设置面板（居中浮窗）：布局常量 + 每个键位 chip 的命中矩形 ——
+const REBIND_PANEL = { w: 620, h: 500 };
+REBIND_PANEL.x = (CANVAS.width - REBIND_PANEL.w) / 2;
+REBIND_PANEL.y = (CANVAS.height - REBIND_PANEL.h) / 2;
+
+const REBIND_ACTIONS = ["forward", "back", "left", "right", "fire"];
+const ACTION_LABELS = { forward: "前进", back: "后退", left: "左转", right: "右转", fire: "开火" };
+
+// 键位 chip 命中表：两列（P1/P2）× 5 行，静态算好
+const rebindChips = [];
+for (let p = 0; p < 2; p++) {
+  REBIND_ACTIONS.forEach((action, row) => {
+    rebindChips.push({
+      player: p,
+      action,
+      x: REBIND_PANEL.x + 110 + p * 270,
+      y: REBIND_PANEL.y + 128 + row * 56,
+      w: 140,
+      h: 36,
+    });
+  });
+}
+const rebindResetBtn = {
+  x: (CANVAS.width - 140) / 2,
+  y: REBIND_PANEL.y + REBIND_PANEL.h - 84, // 底部提示文字上方，别与之重叠
+  w: 140,
+  h: 38,
+};
+
 // —— 暂停菜单按钮（PAUSED 浮窗里的两个按钮，逻辑坐标居中）——
 const PAUSE_BTN_W = 240, PAUSE_BTN_H = 54;
 const PAUSE_BTN_X = (CANVAS.width - PAUSE_BTN_W) / 2;
@@ -110,10 +142,12 @@ function moveKeysLabel(i) {
 // ============================================================
 
 // 菜单点击。判定优先级与浮层遮挡关系保持一致：
-// 说明浮窗（开着时点任意处关闭）> 帮助按钮 > 难度 chip > 道具 chip > 模式按钮
+// 说明浮窗（开着时点任意处关闭）> 帮助按钮 > 键位设置按钮 > 难度 chip > 道具 chip > 模式按钮
+// （键位面板开着时的点击不走这里，由 rebindAction 处理——main 按自身状态分流）
 export function menuAction(mx, my, { showHelp }) {
   if (showHelp) return { type: "closeHelp" };
   if (hitCircle(mx, my, helpBtn.x, helpBtn.y, helpBtn.r)) return { type: "openHelp" };
+  if (hitCircle(mx, my, rebindBtn.x, rebindBtn.y, rebindBtn.r)) return { type: "openRebind" };
   for (const c of difficultyChips) {
     if (hitRect(mx, my, c)) return { type: "aiLevel", key: c.key };
   }
@@ -132,6 +166,21 @@ export function pauseAction(mx, my) {
     if (hitRect(mx, my, b)) return b.action;
   }
   return null;
+}
+
+// 键位设置面板点击（面板打开时 main 只走这里）：
+//   {type:"bind", player, action} 点了某个键位 chip，进入捕获态
+//   {type:"reset"}                恢复默认
+//   {type:"close"}                点在面板外，关闭面板
+//   null                          面板内空白处，无动作
+export function rebindAction(mx, my) {
+  for (const c of rebindChips) {
+    if (hitRect(mx, my, c)) return { type: "bind", player: c.player, action: c.action };
+  }
+  if (hitRect(mx, my, rebindResetBtn)) return { type: "reset" };
+  const p = REBIND_PANEL;
+  if (mx >= p.x && mx <= p.x + p.w && my >= p.y && my <= p.y + p.h) return null;
+  return { type: "close" };
 }
 
 // ============================================================
@@ -217,8 +266,9 @@ export function renderMenu(ctx, view) {
     renderChip(ctx, c, c.label, selected, hover);
   }
 
-  // 玩法说明按钮（右下角圆形 "?"）
+  // 玩法说明按钮（右下角圆形 "?"）+ 键位设置按钮（左下角）
   renderHelpButton(ctx, mx, my);
+  renderRebindButton(ctx, mx, my);
 
   // 底部提示 + 快捷键
   ctx.fillStyle = THEME.textDim;
@@ -308,6 +358,121 @@ function renderHelpButton(ctx, mx, my) {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText("?", helpBtn.x, helpBtn.y + 1);
+}
+
+// 左下角圆形「键」按钮（打开键位设置面板）
+function renderRebindButton(ctx, mx, my) {
+  const hover = hitCircle(mx, my, rebindBtn.x, rebindBtn.y, rebindBtn.r);
+  ctx.beginPath();
+  ctx.arc(rebindBtn.x, rebindBtn.y, rebindBtn.r, 0, Math.PI * 2);
+  ctx.fillStyle = hover ? THEME.accent : THEME.btnFill;
+  ctx.fill();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = THEME.accent;
+  ctx.stroke();
+
+  ctx.fillStyle = hover ? "#ffffff" : THEME.accent;
+  ctx.font = "bold 14px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("键", rebindBtn.x, rebindBtn.y + 1);
+}
+
+// 键位设置面板。view = { mouse, capturing: {player, action}|null, conflictMsg }
+// 只画不改状态：捕获态高亮对应 chip、冲突信息红字提示，交互全在 main。
+export function renderRebindOverlay(ctx, view) {
+  const { x: mx, y: my } = view.mouse;
+  const p = REBIND_PANEL;
+  const cx = CANVAS.width / 2;
+
+  // 半透明遮罩 + 面板底
+  ctx.fillStyle = "rgba(43,43,51,0.55)";
+  ctx.fillRect(0, 0, CANVAS.width, CANVAS.height);
+  ctx.fillStyle = THEME.pageBg;
+  roundRect(ctx, p.x, p.y, p.w, p.h, 14);
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = THEME.accent;
+  roundRect(ctx, p.x, p.y, p.w, p.h, 14);
+  ctx.stroke();
+
+  // 标题 + 操作提示
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = THEME.title;
+  ctx.font = "bold 28px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText("键位设置", cx, p.y + 40);
+  ctx.fillStyle = THEME.textDim;
+  ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText("点击键位后按下新键 · Esc 取消捕获 · Escape / F11 不可绑定", cx, p.y + 72);
+
+  // 两列表头（玩家色圆点 + 名称）
+  for (let i = 0; i < 2; i++) {
+    const hx = p.x + 110 + i * 270 + 70; // 列 chip 的水平中点
+    ctx.fillStyle = PLAYER_COLORS[i];
+    ctx.beginPath();
+    ctx.arc(hx - 34, p.y + 104, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = THEME.textMain;
+    ctx.font = "bold 15px system-ui, 'Microsoft YaHei', sans-serif";
+    ctx.fillText(`玩家 ${i + 1}`, hx + 8, p.y + 104);
+  }
+
+  // 键位行：动作标签 + 当前键 chip（捕获中高亮显示「按新键…」）
+  for (const c of rebindChips) {
+    ctx.textAlign = "right";
+    ctx.fillStyle = THEME.textDim;
+    ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
+    ctx.fillText(ACTION_LABELS[c.action], c.x - 10, c.y + c.h / 2);
+
+    const capturing =
+      view.capturing && view.capturing.player === c.player && view.capturing.action === c.action;
+    const hover = hitRect(mx, my, c);
+
+    ctx.fillStyle = capturing ? THEME.accent : THEME.btnFill;
+    roundRect(ctx, c.x, c.y, c.w, c.h, 8);
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = capturing || hover ? THEME.accent : THEME.btnDisabledBorder;
+    roundRect(ctx, c.x, c.y, c.w, c.h, 8);
+    ctx.stroke();
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = capturing ? "#ffffff" : THEME.textMain;
+    ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
+    ctx.fillText(
+      capturing ? "按新键…" : keyLabel(KEY_BINDINGS[c.player][c.action]),
+      c.x + c.w / 2,
+      c.y + c.h / 2
+    );
+  }
+
+  // 冲突/提示信息（红字，短暂显示后由 main 清除）
+  if (view.conflictMsg) {
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#c0392b";
+    ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
+    ctx.fillText(view.conflictMsg, cx, rebindResetBtn.y - 22);
+  }
+
+  // 恢复默认按钮
+  const resetHover = hitRect(mx, my, rebindResetBtn);
+  ctx.fillStyle = resetHover ? THEME.accent : THEME.btnFill;
+  roundRect(ctx, rebindResetBtn.x, rebindResetBtn.y, rebindResetBtn.w, rebindResetBtn.h, 8);
+  ctx.fill();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = THEME.accent;
+  roundRect(ctx, rebindResetBtn.x, rebindResetBtn.y, rebindResetBtn.w, rebindResetBtn.h, 8);
+  ctx.stroke();
+  ctx.textAlign = "center";
+  ctx.fillStyle = resetHover ? "#ffffff" : THEME.accent;
+  ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText("恢复默认", rebindResetBtn.x + rebindResetBtn.w / 2, rebindResetBtn.y + rebindResetBtn.h / 2);
+
+  // 底部关闭提示
+  ctx.fillStyle = THEME.textDim;
+  ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText("点击面板外关闭", cx, p.y + p.h - 24);
 }
 
 // 玩法说明浮窗：半透明遮罩 + 居中面板，列出操作/规则/快捷键/道具

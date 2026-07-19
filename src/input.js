@@ -69,6 +69,13 @@ export function isJustPressed(code) {
   return justPressed.has(code);
 }
 
+// 本帧任意刚按下的键（改键捕获用）：返回第一个 code，没有则 null。
+// Set 保持插入序，同帧按多个键时取最先按下的那个。
+export function getAnyJustPressed() {
+  for (const code of justPressed) return code;
+  return null;
+}
+
 // 把键位表转成统一控制指令 { turn, move, fire }——
 // 这是「控制源抽象」的键盘实现：Tank 只消费指令不读键盘，
 // AI 玩家由 ai.js 产出同构指令（接口与此对齐），主循环对人/AI 无感知。
