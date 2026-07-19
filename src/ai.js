@@ -62,6 +62,18 @@ function segmentHitsWalls(x1, y1, x2, y2, walls) {
   return false;
 }
 
+// 线段穿过几段内墙（border 边界墙不计——穿墙弹本就穿不了边界）。
+// 注意按"线段"计数：斜线跨过两格边的两段墙会计 2，此时穿墙弹只能穿第一段，
+// 判 ≠1 不开火——保守正确，不浪费存货。
+function countInnerWallsHit(x1, y1, x2, y2, walls) {
+  let n = 0;
+  for (const w of walls) {
+    if (w.border) continue;
+    if (segmentVsSegment(x1, y1, x2, y2, w.x1, w.y1, w.x2, w.y2)) n++;
+  }
+  return n;
+}
+
 // 朝指定航向操舵：取最短旋转对齐；航向更靠车尾时倒车贴合（车尾当车头），
 // 省掉慢吞吞的 180° 转身——躲弹时这省出的就是命。
 function steerToHeading(self, heading) {
@@ -226,6 +238,7 @@ export class AiController {
     const enemyHasShield = enemy.shield;              // 敌人有无敌护盾
     const enemyShieldExpiring = enemy.shieldTimer < 1.5; // 护盾快到期（<1.5s 闪烁）
     const enemyHasScatter = enemy.scatterShots > 0;   // 敌人有散射弹（火力密集）
+    const enemyHasPierce = enemy.pierceShots > 0;     // 敌人有穿墙弹（墙不再是掩体）
 
     const selfHasShield = self.shield;                // 自己有护盾
     const selfShieldExpiring = self.shieldTimer < 1.5; // 自己护盾快到期
@@ -234,10 +247,11 @@ export class AiController {
     //   自己有护盾（且未快到期）→ 狂暴模式：直接冲锋、不躲弹、放开火力、不捡道具（时间宝贵）
     //   敌人有护盾（且未快到期）→ 避战模式：不贴脸反打、优先捡道具/游走——
     //     开火不禁（护盾挡一发即碎，远距点破它的盾是赚的），只是不上去换命
-    //   敌人有散射 → 防守模式：加强躲避、减少激进追击
+    //   敌人有散射/穿墙弹 → 防守模式：加强躲避、减少激进追击
+    //     （散射=火力密集；穿墙=隔墙也可能挨打，掩体不再可靠）
     const berserkMode = selfHasShield && !selfShieldExpiring;  // 狂暴：利用无敌冲锋
     const avoidMode = enemyHasShield && !enemyShieldExpiring; // 避战：等护盾消失
-    const defensiveMode = enemyHasScatter;                    // 防守：应对散射威胁
+    const defensiveMode = enemyHasScatter || enemyHasPierce;  // 防守：应对强化火力
 
     // 开火冷却流逝：近战圈/狂暴模式按倍速燃烧（快速连发）
     // 避战模式不加速（不急着开火）
@@ -470,6 +484,20 @@ export class AiController {
         fire = true;
         this.fireTimer = randRange(this.cfg.fireCooldown);
       }
+    } else if (gunReady && self.pierceShots > 0 && this.cfg.leadFactor > 0) {
+      // 穿墙弹隔墙狙：无视线但瞄准线恰好只隔 1 堵内墙、拦截点在 5 格射程内时，
+      // 按稍收紧的质量门（×0.8 防浪费存货）评估，满足就隔墙开火。
+      // 简单档 leadFactor=0 天然不启用——没有预判能力谈不上隔墙狙。
+      if (
+        aimDist < CELL_SIZE * 5 &&
+        countInnerWallsHit(self.x, self.y, aimX, aimY, world.maze.walls) === 1
+      ) {
+        const hitTol = Math.atan2((TANK.radius + BULLET.radius) * AI.hitSlack, aimDist);
+        if (Math.abs(aimErr) < hitTol * this.cfg.aimSkill * 0.8) {
+          fire = true;
+          this.fireTimer = randRange(this.cfg.fireCooldown);
+        }
+      }
     }
 
     return { turn, move, fire };
@@ -527,9 +555,10 @@ export class AiController {
     for (const p of powerups) {
       if (p.taken) continue;
 
-      // ① 有用性：盾在身上不重复捡；散射有库存就先用掉再说
+      // ① 有用性：盾在身上不重复捡；散射/穿墙有库存就先用掉再说
       if (p.type === "shield" && self.shield) continue;
       if (p.type === "scatter" && self.scatterShots > 0) continue;
+      if (p.type === "pierce" && self.pierceShots > 0) continue;
 
       const d = Math.hypot(p.x - self.x, p.y - self.y);
       if (d > range) continue; // ② 超出感知范围

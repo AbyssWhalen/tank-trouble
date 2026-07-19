@@ -17,8 +17,15 @@ function randRange([min, max]) {
   return min + Math.random() * (max - min);
 }
 
+// 道具类型 → 圆底颜色（新增类型在此登记一行即可）
+const TYPE_BG = {
+  scatter: THEME.powScatterBg,
+  shield: THEME.powShieldBg,
+  pierce: THEME.powPierceBg,
+};
+
 export class Powerup {
-  // x, y: 世界坐标（格中心附近）；type: "scatter" | "shield"
+  // x, y: 世界坐标（格中心附近）；type: "scatter" | "shield" | "pierce"
   constructor(x, y, type) {
     this.x = x;
     this.y = y;
@@ -40,7 +47,7 @@ export class Powerup {
     ctx.translate(this.x, this.y);
 
     // —— 圆底（按类型上色）+ 深色描边 ——
-    ctx.fillStyle = this.type === "scatter" ? THEME.powScatterBg : THEME.powShieldBg;
+    ctx.fillStyle = TYPE_BG[this.type] || THEME.powScatterBg;
     ctx.beginPath();
     ctx.arc(0, 0, rr, 0, Math.PI * 2);
     ctx.fill();
@@ -56,6 +63,8 @@ export class Powerup {
     ctx.lineJoin = "round";
     if (this.type === "scatter") {
       drawScatterIcon(ctx, r);
+    } else if (this.type === "pierce") {
+      drawPierceIcon(ctx, r);
     } else {
       drawShieldIcon(ctx, r);
     }
@@ -99,6 +108,33 @@ function drawShieldIcon(ctx, r) {
   ctx.quadraticCurveTo(w, bot, 0, bot);   // 右下收向尖底
   ctx.quadraticCurveTo(-w, bot, -w, mid); // 左下收向尖底
   ctx.closePath();
+  ctx.stroke();
+}
+
+// 穿墙图标：中间一道竖墙（两段留缺口），一支箭从左穿缺口而过（表"穿透"）
+function drawPierceIcon(ctx, r) {
+  const wallX = 0;
+  const half = r * 0.62;
+  const gap = r * 0.2;
+  // 竖墙上下两段，中间留缺口
+  ctx.beginPath();
+  ctx.moveTo(wallX, -half);
+  ctx.lineTo(wallX, -gap);
+  ctx.moveTo(wallX, gap);
+  ctx.lineTo(wallX, half);
+  ctx.stroke();
+  // 横穿的箭：杆 + 箭头
+  const ax0 = -r * 0.62, ax1 = r * 0.62;
+  ctx.beginPath();
+  ctx.moveTo(ax0, 0);
+  ctx.lineTo(ax1, 0);
+  ctx.stroke();
+  const back = 4.5;
+  ctx.beginPath();
+  ctx.moveTo(ax1, 0);
+  ctx.lineTo(ax1 - back, -back * 0.8);
+  ctx.moveTo(ax1, 0);
+  ctx.lineTo(ax1 - back, back * 0.8);
   ctx.stroke();
 }
 

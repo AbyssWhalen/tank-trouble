@@ -22,7 +22,10 @@ export class Tank {
     this.cooldown = 0;
 
     // —— 道具状态（捡到道具时由 applyPowerup 设置；无道具时全为初值）——
+    // scatter/pierce 同属「武器改装槽」互斥（异类拾取清旧换新，同类叠加次数），
+    // shield 独立并存——见 applyPowerup。
     this.scatterShots = 0;   // 剩余「扇形开火」次数，>0 时 tryFire 打扇形并递减
+    this.pierceShots = 0;    // 剩余「穿墙弹」发数，>0 时单发子弹带穿墙 1 次的能力
     this.shield = false;     // 是否持有护盾（挡一次致命伤害）
     this.shieldTimer = 0;    // 护盾剩余时间（秒），到点自动消失防一直龟
   }
@@ -104,12 +107,20 @@ export class Tank {
       return out;
     }
 
+    // 穿墙弹：普通单发弹道（受 maxAlive 限流，上面已查过），只是弹上带
+    // 「可穿透 1 堵内墙」的额度；打完存货自动恢复普通弹
+    if (this.pierceShots > 0) {
+      this.pierceShots--;
+      return [this.spawnBullet(this.angle, walls, 1)];
+    }
+
     return [this.spawnBullet(this.angle, walls)];
   }
 
   // 沿给定 heading 生成一发子弹，含贴墙出膛修正（防穿墙）。
   // 抽出来供单发 / 散射多发共用：每发各按自己的角度独立修正出膛点。
-  spawnBullet(heading, walls) {
+  // pierceLeft: 该弹可穿透的内墙数（穿墙弹传 1，普通弹省略为 0）。
+  spawnBullet(heading, walls, pierceLeft = 0) {
     // 炮口位置：从车体中心沿朝向伸出（炮管末端再多探出一点，避免子弹生成在车体内被自己挡）
     const muzzleDist = TANK.bodyLength / 2 + TANK.barrelLength + BULLET.radius + 2;
 
@@ -133,13 +144,20 @@ export class Tank {
     const by = this.y + Math.sin(heading) * spawnDist;
     const vx = Math.cos(heading) * BULLET.speed;
     const vy = Math.sin(heading) * BULLET.speed;
-    return new Bullet(bx, by, vx, vy, this);
+    return new Bullet(bx, by, vx, vy, this, pierceLeft);
   }
 
-  // 拾取道具：按类型设置对应状态。散射叠加开火次数，护盾刷新一层 + 重置计时。
+  // 拾取道具：按类型设置对应状态。
+  // 武器改装槽（scatter/pierce）互斥：拾取异类先清空旧存货再赋新，
+  // 同类拾取叠加次数；shield 独立并存（刷新一层 + 重置计时）。
+  // 互斥让 tryFire 的分支优先级永远无歧义，玩家/AI 心智模型也简单。
   applyPowerup(type) {
     if (type === "scatter") {
+      this.pierceShots = 0;
       this.scatterShots += POWERUP.scatter.shots;
+    } else if (type === "pierce") {
+      this.scatterShots = 0;
+      this.pierceShots += POWERUP.pierce.shots;
     } else if (type === "shield") {
       this.shield = true;
       this.shieldTimer = POWERUP.shield.duration;

@@ -274,7 +274,7 @@ export function renderMenu(ctx, view) {
   ctx.fillStyle = THEME.textDim;
   ctx.font = "13px system-ui, sans-serif";
   ctx.textAlign = "center";
-  ctx.fillText("点击模式开始对战　·　对战中 R 重开 · Esc 返回菜单", cx, CANVAS.height - 38);
+  ctx.fillText("点击模式开始对战　·　结算时 R 立即开下一局 · Esc 返回菜单", cx, CANVAS.height - 38);
 
   // 说明浮窗（最上层，盖住整个菜单）
   if (view.showHelp) renderHelpOverlay(ctx, cx);
@@ -532,6 +532,7 @@ function renderHelpOverlay(ctx, cx) {
   section("道具（可在菜单开关）");
   line("护盾：挡下一发致命攻击即碎，或 5 秒后自动消失（先到先算）");
   line("散射：连续 3 次扇形开火（一炮 3 发）");
+  line("穿墙：接下来 2 发紫色子弹可穿透一堵内墙（边界墙除外）");
   ly += 6;
 
   section("快捷键");

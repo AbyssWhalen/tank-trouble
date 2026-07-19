@@ -130,6 +130,8 @@ function ensureConnected(cells, cols, rows) {
 // 把格子的墙转成世界坐标线段（去重）。
 // 只在"本格"负责 top 和 left，外圈的 right(最后一列)、bottom(最后一行) 另算，
 // 避免相邻格共享墙被画两次。
+// border 标记：外边界墙（初始化后永不被敲）为 true——穿墙弹只穿内墙，
+// 靠这个标记保证物理上不可能飞出场外。
 function buildWallSegments(cells, cols, rows) {
   const segs = [];
   const S = CELL_SIZE;
@@ -140,12 +142,14 @@ function buildWallSegments(cells, cols, rows) {
       const x = c * S;
       const y = r * S;
 
-      if (cell.top) segs.push({ x1: x, y1: y, x2: x + S, y2: y });
-      if (cell.left) segs.push({ x1: x, y1: y, x2: x, y2: y + S });
+      if (cell.top)
+        segs.push({ x1: x, y1: y, x2: x + S, y2: y, border: r === 0 });
+      if (cell.left)
+        segs.push({ x1: x, y1: y, x2: x, y2: y + S, border: c === 0 });
       if (c === cols - 1 && cell.right)
-        segs.push({ x1: x + S, y1: y, x2: x + S, y2: y + S });
+        segs.push({ x1: x + S, y1: y, x2: x + S, y2: y + S, border: true });
       if (r === rows - 1 && cell.bottom)
-        segs.push({ x1: x, y1: y + S, x2: x + S, y2: y + S });
+        segs.push({ x1: x, y1: y + S, x2: x + S, y2: y + S, border: true });
     }
   }
 

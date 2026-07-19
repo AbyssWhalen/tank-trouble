@@ -186,14 +186,17 @@ export const VIEWPORT_PADDING = {
 };
 
 // 道具系统（菜单可开关）。道具在地图随机刷新，坦克碾过即捡取。
-// 两种：scatter 散射弹（一炮变扇形多发，给若干次开火机会）、
-//       shield 护盾（挡一次致命伤害，或限时自动消失，先到先算）。
+// 种类：scatter 散射弹（一炮变扇形多发，给若干次开火机会）、
+//       shield 护盾（挡一次致命伤害，或限时自动消失，先到先算）、
+//       pierce 穿墙弹（接下来几发子弹可穿透一堵内墙，穿后恢复正常反弹）。
+// scatter/pierce（以及后续 mine）同属「武器改装槽」互斥：同类拾取叠次数、
+// 异类拾取清旧换新；shield 独立并存。
 // 效果全作用在 tank 状态上，控制指令 {turn,move,fire} 不变 → AI 自动受益、无需特判。
 export const POWERUP = {
   spawnInterval: [6, 10], // 距上次刷新多久再刷（秒，随机区间）
   maxOnField: 2,          // 场上同时最多几个道具
   radius: 16,             // 拾取圈半径（≈坦克半径，碾过即吃）
-  types: ["scatter", "shield"], // 可刷新的种类（菜单关掉则整局不刷）
+  types: ["scatter", "shield", "pierce"], // 可刷新的种类（菜单关掉则整局不刷）
 
   scatter: {
     shots: 3,             // 捡一次给几次「扇形开火」机会
@@ -202,6 +205,9 @@ export const POWERUP = {
   },
   shield: {
     duration: 5,          // 护盾最长持续（秒），到点自动消失防一直龟
+  },
+  pierce: {
+    shots: 2,             // 捡一次给几发穿墙弹（每发可穿 1 堵内墙）
   },
 };
 
@@ -242,7 +248,9 @@ export const THEME = {
   // 道具（地上的拾取物 + 坦克身上的护盾环）
   powScatterBg: "#e9a200", // 散射弹底色（暖橙，地面上够跳）
   powShieldBg: "#2bb3c4",  // 护盾道具底色（青蓝）
+  powPierceBg: "#7c4dff",  // 穿墙弹底色（紫，与 P4 玩家色同源但本地版用不上 P4）
   powIcon: "#ffffff",      // 道具图标线条（白，压在底色上）
   powRing: "#2b2b33",      // 道具圆底描边
   shieldRing: "#3ad4e8",   // 坦克护盾光环色（半透明在 render 里加）
+  bulletPierce: "#5b2fd6", // 穿墙弹弹体色（深紫，浅场地可读；穿墙后变回黑点）
 };

@@ -225,11 +225,16 @@ export class MuzzleFlash {
 // 轻量提示「这里捡到了东西」，颜色按道具类型取（散射橙 / 护盾青）。
 // ============================================================
 export class PickupFlash {
-  // x, y: 拾取位置；type: "scatter" | "shield"（决定环色）
+  // x, y: 拾取位置；type: 道具类型（决定环色，未登记类型走散射橙兜底）
   constructor(x, y, type) {
     this.x = x;
     this.y = y;
-    this.color = type === "scatter" ? THEME.powScatterBg : THEME.powShieldBg;
+    const colors = {
+      scatter: THEME.powScatterBg,
+      shield: THEME.powShieldBg,
+      pierce: THEME.powPierceBg,
+    };
+    this.color = colors[type] || THEME.powScatterBg;
     this.age = 0;
     this.duration = 0.3;
   }
