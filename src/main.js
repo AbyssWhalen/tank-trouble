@@ -4,7 +4,8 @@
 //   PLAYING   —— 2 辆坦克分置左上/右下角，各自控制源（键盘/AI）独立操作，
 //                子弹全局，互相击中
 //   ROUND_OVER—— 存活 ≤1 时显示获胜/同归于尽横幅，R 重开同模式，Esc 回菜单
-// 地图 2 人 = 9×7 = 864×672，稳放进 960×720 画布，居中平移，暂不缩放。
+// 界面绘制与命中检测在 ui.js（菜单/浮层/HUD/横幅）；本文件持有全部游戏状态，
+// 消费 ui 返回的 action 对象做状态变更——ui 只说「点到了什么」，不动状态。
 //
 // 渲染坐标系：全程跑「逻辑像素」960×720（CANVAS.width/height）。
 //   HiDPI 适配：canvas 内部分辨率放大到 dpr 倍，ctx 统一 scale(dpr)，
@@ -15,7 +16,7 @@
 
 import {
   CANVAS, PLAYER_COLORS, KEY_BINDINGS, MAZE_TIERS, TIER_POOL_BY_MODE,
-  WALL, CELL_SIZE, BULLET, TANK, THEME, ROUND_RESTART_DELAY, AI_DIFFICULTY,
+  WALL, CELL_SIZE, BULLET, TANK, THEME, ROUND_RESTART_DELAY,
   POWERUP,
 } from "./config.js";
 import { Player } from "./player.js";
@@ -28,6 +29,10 @@ import {
   isJustPressed, endFrame,
   bindMouse, getMousePos, isClicked,
 } from "./input.js";
+import {
+  renderMenu, renderPauseOverlay, renderHud, renderRoundOverBanner,
+  menuAction, pauseAction,
+} from "./ui.js";
 
 const canvas = document.getElementById("game-canvas");
 const ctx = canvas.getContext("2d");
@@ -82,62 +87,6 @@ let roundOverTimer = 0;        // ROUND_OVER 倒计时（秒），归零自动�
 let aiLevel = "normal";        // 选中的 AI 难度档（菜单 chip 单选），开局/R 重开沿用
 let powerupsOn = true;         // 道具开关（菜单 toggle），开局/R 重开沿用
 let showHelp = false;          // 玩法说明浮窗是否显示（叠在菜单上的浮层）
-
-// —— 菜单按钮（逻辑坐标，不随迷宫平移）——
-const BTN_W = 300, BTN_H = 66;
-const BTN_X = (CANVAS.width - BTN_W) / 2;
-const buttons = [
-  { label: "双人对战", sub: "P1 vs P2", mode: "pvp", enabled: true, x: BTN_X, y: 322, w: BTN_W, h: BTN_H },
-  { label: "人机对战", sub: "P1 vs AI", mode: "pve", enabled: true, x: BTN_X, y: 410, w: BTN_W, h: BTN_H },
-];
-
-// —— AI 难度 chip（人机按钮正下方一排单选，点选改 aiLevel）——
-const CHIP_W = 88, CHIP_H = 32, CHIP_GAP = 14;
-const chipKeys = Object.keys(AI_DIFFICULTY); // ["easy","normal","hard"]，展示顺序即定义顺序
-const CHIPS_X = (CANVAS.width - (chipKeys.length * CHIP_W + (chipKeys.length - 1) * CHIP_GAP)) / 2;
-const difficultyChips = chipKeys.map((key, i) => ({
-  key,
-  x: CHIPS_X + i * (CHIP_W + CHIP_GAP),
-  y: 494, // 人机按钮底边 476 再留 18px
-  w: CHIP_W,
-  h: CHIP_H,
-}));
-
-// —— 道具开关（难度 chip 下方一排开/关 chip，与难度选择同款样式，视觉统一）——
-// 之前是 iOS 风滑动开关，和上方的 chip 组风格割裂、略显呆板；
-// 改成同款 chip 单选（开/关），整个菜单的选项区视觉一致。
-const POW_CHIP_W = 88, POW_CHIP_H = 32, POW_CHIP_GAP = 14;
-const powChipKeys = [true, false]; // 开 / 关
-const POW_CHIPS_X = (CANVAS.width - (2 * POW_CHIP_W + POW_CHIP_GAP)) / 2;
-const powupChips = powChipKeys.map((on, i) => ({
-  on,
-  label: on ? "开启" : "关闭",
-  x: POW_CHIPS_X + i * (POW_CHIP_W + POW_CHIP_GAP),
-  y: 544, // 难度 chip 底边 526 再留 18px
-  w: POW_CHIP_W,
-  h: POW_CHIP_H,
-}));
-
-// —— 玩法说明按钮（右下角圆形 "?" 按钮，点开浮窗）——
-const helpBtn = { x: CANVAS.width - 56, y: CANVAS.height - 56, r: 20 };
-
-// —— 暂停菜单按钮（PAUSED 状态下浮窗里的两个按钮，逻辑坐标居中）——
-const PAUSE_BTN_W = 240, PAUSE_BTN_H = 54;
-const PAUSE_BTN_X = (CANVAS.width - PAUSE_BTN_W) / 2;
-const pauseButtons = [
-  { label: "继续对战", action: "resume", x: PAUSE_BTN_X, y: 340, w: PAUSE_BTN_W, h: PAUSE_BTN_H },
-  { label: "返回主菜单", action: "menu", x: PAUSE_BTN_X, y: 410, w: PAUSE_BTN_W, h: PAUSE_BTN_H },
-];
-
-// 点 (mx,my) 是否落在矩形内
-function hitRect(mx, my, r) {
-  return mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h;
-}
-
-// 点 (mx,my) 是否落在圆内（圆形按钮命中检测）
-function hitCircle(mx, my, cx, cy, radius) {
-  return Math.hypot(mx - cx, my - cy) <= radius;
-}
 
 // 开一整场：从菜单进入时调用。清零累计分，再开第一回合。
 // 与 setupRound 的分工：startMatch 负责「整场」级状态(分数)，
@@ -217,41 +166,29 @@ function update(dt) {
   endFrame();
 }
 
+// 菜单：把点击交给 ui.menuAction 判定「点到了什么」，这里只做状态变更
 function updateMenu() {
   if (!isClicked()) return;
   const { x: mx, y: my } = getMousePos();
+  const action = menuAction(mx, my, { showHelp });
+  if (!action) return;
 
-  // 说明浮窗打开时：点任意处（或关闭按钮）关闭浮窗，不穿透到下层菜单
-  if (showHelp) {
-    showHelp = false;
-    return;
-  }
-
-  // 玩法说明按钮（右下角 "?"）：打开浮窗
-  if (hitCircle(mx, my, helpBtn.x, helpBtn.y, helpBtn.r)) {
-    showHelp = true;
-    return;
-  }
-
-  // 难度 chip：单选切换，不开局
-  for (const c of difficultyChips) {
-    if (hitRect(mx, my, c)) {
-      aiLevel = c.key;
-      return;
-    }
-  }
-  // 道具开/关 chip：单选切换，不开局
-  for (const c of powupChips) {
-    if (hitRect(mx, my, c)) {
-      powerupsOn = c.on;
-      return;
-    }
-  }
-  for (const b of buttons) {
-    if (b.enabled && hitRect(mx, my, b)) {
-      startMatch(b.mode);
-      return;
-    }
+  switch (action.type) {
+    case "closeHelp":
+      showHelp = false;
+      break;
+    case "openHelp":
+      showHelp = true;
+      break;
+    case "aiLevel":
+      aiLevel = action.key;
+      break;
+    case "powerups":
+      powerupsOn = action.on;
+      break;
+    case "mode":
+      startMatch(action.mode);
+      break;
   }
 }
 
@@ -361,7 +298,7 @@ function updatePlaying(dt) {
 }
 
 function updatePaused() {
-  // 暂停状态：按 Esc 继续，或点击按钮
+  // 暂停状态：按 Esc 继续，或点击按钮（命中判定在 ui.pauseAction）
   if (isJustPressed("Escape")) {
     state = STATE.PLAYING;
     return;
@@ -369,15 +306,11 @@ function updatePaused() {
 
   if (!isClicked()) return;
   const { x: mx, y: my } = getMousePos();
-  for (const b of pauseButtons) {
-    if (hitRect(mx, my, b)) {
-      if (b.action === "resume") {
-        state = STATE.PLAYING;
-      } else if (b.action === "menu") {
-        state = STATE.MENU; // 弃局返回主菜单（不计分）
-      }
-      return;
-    }
+  const action = pauseAction(mx, my);
+  if (action === "resume") {
+    state = STATE.PLAYING;
+  } else if (action === "menu") {
+    state = STATE.MENU; // 弃局返回主菜单（不计分）
   }
 }
 
@@ -407,300 +340,19 @@ function render() {
 
   switch (state) {
     case STATE.MENU:
-      renderMenu();
+      renderMenu(ctx, { mouse: getMousePos(), aiLevel, powerupsOn, showHelp });
       break;
     case STATE.PLAYING:
       renderArena();
       break;
     case STATE.PAUSED:
       renderArena();
-      renderPauseOverlay();
+      renderPauseOverlay(ctx, getMousePos());
       break;
     case STATE.ROUND_OVER:
       renderArena();
-      renderRoundOverBanner();
+      renderRoundOverBanner(ctx, { winner, secondsLeft: roundOverTimer });
       break;
-  }
-}
-
-function renderMenu() {
-  const cx = CANVAS.width / 2;
-  const { x: mx, y: my } = getMousePos();
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-
-  // 标题
-  ctx.fillStyle = THEME.title;
-  ctx.font = "bold 64px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.fillText("坦克回廊", cx, 130);
-
-  // 标题下细横线装饰（主题色，加点游戏感）
-  ctx.strokeStyle = THEME.accent;
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(cx - 90, 172);
-  ctx.lineTo(cx + 90, 172);
-  ctx.stroke();
-
-  // —— 操作说明：左右分栏卡片（P1 | P2）——
-  renderControlCards(cx);
-
-  // 模式按钮
-  for (const b of buttons) {
-    const hover = b.enabled && hitRect(mx, my, b);
-
-    // 按钮底
-    if (!b.enabled) ctx.fillStyle = THEME.btnDisabledFill;
-    else ctx.fillStyle = hover ? THEME.btnFillHover : THEME.btnFill;
-    roundRect(b.x, b.y, b.w, b.h, 10);
-    ctx.fill();
-
-    // 边框（hover 时用主题色）
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = !b.enabled ? THEME.btnDisabledBorder : hover ? THEME.accent : THEME.btnBorder;
-    roundRect(b.x, b.y, b.w, b.h, 10);
-    ctx.stroke();
-
-    // 主文字
-    const textColor = !b.enabled
-      ? THEME.btnDisabledText
-      : hover ? THEME.btnTextHover : THEME.btnBorder;
-    ctx.fillStyle = textColor;
-    ctx.font = "bold 24px system-ui, 'Microsoft YaHei', sans-serif";
-    ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2 - 9);
-
-    // 副文字
-    ctx.fillStyle = !b.enabled
-      ? THEME.btnDisabledText
-      : hover ? THEME.btnTextHover : THEME.textDim;
-    ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
-    ctx.fillText(b.sub, b.x + b.w / 2, b.y + b.h / 2 + 16);
-  }
-
-  // AI 难度 chip（单选：选中主题色实心，未选白底；只影响人机对战）
-  ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.textAlign = "right";
-  ctx.fillStyle = THEME.textDim;
-  ctx.fillText("AI 难度", difficultyChips[0].x - 14, difficultyChips[0].y + CHIP_H / 2);
-  ctx.textAlign = "center";
-  for (const c of difficultyChips) {
-    const selected = c.key === aiLevel;
-    const hover = hitRect(mx, my, c);
-    renderChip(c, AI_DIFFICULTY[c.key].label, selected, hover);
-  }
-
-  // 道具开/关 chip（与难度同款样式，视觉统一）
-  ctx.textAlign = "right";
-  ctx.fillStyle = THEME.textDim;
-  ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.fillText("道具", powupChips[0].x - 14, powupChips[0].y + POW_CHIP_H / 2);
-  ctx.textAlign = "center";
-  for (const c of powupChips) {
-    const selected = c.on === powerupsOn;
-    const hover = hitRect(mx, my, c);
-    renderChip(c, c.label, selected, hover);
-  }
-
-  // 玩法说明按钮（右下角圆形 "?"）
-  renderHelpButton(mx, my);
-
-  // 底部提示 + 快捷键
-  ctx.fillStyle = THEME.textDim;
-  ctx.font = "13px system-ui, sans-serif";
-  ctx.textAlign = "center";
-  ctx.fillText("点击模式开始对战　·　对战中 R 重开 · Esc 返回菜单", cx, CANVAS.height - 38);
-
-  // 说明浮窗（最上层，盖住整个菜单）
-  if (showHelp) renderHelpOverlay(cx);
-}
-
-// 操作说明卡片：左右分栏（P1 蓝 | P2 红），图标化键位
-function renderControlCards(cx) {
-  const cardW = 230, cardH = 78, gap = 24;
-  const totalW = cardW * 2 + gap;
-  const startX = cx - totalW / 2;
-  const y = 200;
-
-  const cards = [
-    { title: "玩家 1", color: PLAYER_COLORS[0], move: "W A S D", fire: "Space 开炮" },
-    { title: "玩家 2", color: PLAYER_COLORS[1], move: "↑ ↓ ← →", fire: "Enter 开炮" },
-  ];
-
-  cards.forEach((card, i) => {
-    const x = startX + i * (cardW + gap);
-
-    // 卡片底
-    ctx.fillStyle = "#ffffff";
-    roundRect(x, y, cardW, cardH, 10);
-    ctx.fill();
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = THEME.btnDisabledBorder;
-    roundRect(x, y, cardW, cardH, 10);
-    ctx.stroke();
-
-    // 左侧色块标识（玩家色）
-    ctx.fillStyle = card.color;
-    roundRect(x + 14, y + cardH / 2 - 14, 28, 28, 6);
-    ctx.fill();
-
-    // 标题
-    ctx.textAlign = "left";
-    ctx.fillStyle = THEME.textMain;
-    ctx.font = "bold 15px system-ui, 'Microsoft YaHei', sans-serif";
-    ctx.fillText(card.title, x + 54, y + 24);
-
-    // 键位
-    ctx.fillStyle = THEME.textDim;
-    ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
-    ctx.fillText(card.move + "  移动", x + 54, y + 44);
-    ctx.fillText(card.fire, x + 54, y + 62);
-  });
-  ctx.textAlign = "center";
-}
-
-// 通用 chip 渲染（难度/道具共用）：选中主题色实心，未选白底描边
-function renderChip(c, label, selected, hover) {
-  ctx.fillStyle = selected ? THEME.accent : THEME.btnFill;
-  roundRect(c.x, c.y, c.w, c.h, 8);
-  ctx.fill();
-
-  ctx.lineWidth = 1.5;
-  ctx.strokeStyle = selected ? THEME.accent : hover ? THEME.accent : THEME.btnDisabledBorder;
-  roundRect(c.x, c.y, c.w, c.h, 8);
-  ctx.stroke();
-
-  ctx.fillStyle = selected ? "#ffffff" : hover ? THEME.textMain : THEME.textDim;
-  ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.fillText(label, c.x + c.w / 2, c.y + c.h / 2);
-}
-
-// 右下角圆形 "?" 按钮
-function renderHelpButton(mx, my) {
-  const hover = hitCircle(mx, my, helpBtn.x, helpBtn.y, helpBtn.r);
-  ctx.beginPath();
-  ctx.arc(helpBtn.x, helpBtn.y, helpBtn.r, 0, Math.PI * 2);
-  ctx.fillStyle = hover ? THEME.accent : THEME.btnFill;
-  ctx.fill();
-  ctx.lineWidth = 1.5;
-  ctx.strokeStyle = THEME.accent;
-  ctx.stroke();
-
-  ctx.fillStyle = hover ? "#ffffff" : THEME.accent;
-  ctx.font = "bold 20px system-ui, sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("?", helpBtn.x, helpBtn.y + 1);
-}
-
-// 玩法说明浮窗：半透明遮罩 + 居中面板，列出操作/规则/快捷键/道具
-function renderHelpOverlay(cx) {
-  // 半透明遮罩
-  ctx.fillStyle = "rgba(43,43,51,0.55)";
-  ctx.fillRect(0, 0, CANVAS.width, CANVAS.height);
-
-  // 面板
-  const pw = 560, ph = 480;
-  const px = cx - pw / 2, py = (CANVAS.height - ph) / 2;
-  ctx.fillStyle = THEME.pageBg;
-  roundRect(px, py, pw, ph, 14);
-  ctx.fill();
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = THEME.accent;
-  roundRect(px, py, pw, ph, 14);
-  ctx.stroke();
-
-  // 标题
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillStyle = THEME.title;
-  ctx.font = "bold 28px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.fillText("玩法说明", cx, py + 40);
-
-  // 分区内容（左对齐排版）
-  const lx = px + 40;
-  let ly = py + 84;
-  const lineH = 26;
-
-  const section = (title) => {
-    ctx.textAlign = "left";
-    ctx.fillStyle = THEME.accent;
-    ctx.font = "bold 16px system-ui, 'Microsoft YaHei', sans-serif";
-    ctx.fillText(title, lx, ly);
-    ly += lineH;
-  };
-  const line = (text) => {
-    ctx.textAlign = "left";
-    ctx.fillStyle = THEME.textMain;
-    ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
-    ctx.fillText(text, lx + 12, ly);
-    ly += lineH - 2;
-  };
-
-  section("操作");
-  line("玩家 1：WASD 移动，Space 开炮");
-  line("玩家 2：方向键移动，Enter 开炮");
-  ly += 6;
-
-  section("规则");
-  line("击毁对手得 1 分，迷宫墙壁可反弹子弹（小心自己的跳弹）");
-  line("每回合自动换地图，回合结束后倒计时自动重开");
-  ly += 6;
-
-  section("道具（可在菜单开关）");
-  line("护盾：5 秒无敌，期间任何子弹都打不死");
-  line("散射：连续 3 次扇形开火（一炮 3 发）");
-  ly += 6;
-
-  section("快捷键");
-  line("R 立即重开本局　·　Esc 返回菜单");
-
-  // 底部关闭提示
-  ctx.textAlign = "center";
-  ctx.fillStyle = THEME.textDim;
-  ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.fillText("点击任意处关闭", cx, py + ph - 28);
-}
-
-// 暂停浮层（叠在竞技场上）：半透明遮罩 + 标题 + 两个按钮（继续 / 返回主菜单）
-function renderPauseOverlay() {
-  const cx = CANVAS.width / 2;
-  const { x: mx, y: my } = getMousePos();
-
-  // 半透明遮罩
-  ctx.fillStyle = "rgba(43,43,51,0.7)";
-  ctx.fillRect(0, 0, CANVAS.width, CANVAS.height);
-
-  // 标题
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillStyle = "#ffffff";
-  ctx.font = "bold 48px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.fillText("暂停", cx, 220);
-
-  // 提示
-  ctx.fillStyle = "rgba(255,255,255,0.7)";
-  ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.fillText("按 Esc 继续对战", cx, 270);
-
-  // 按钮
-  for (const b of pauseButtons) {
-    const hover = hitRect(mx, my, b);
-
-    // 按钮底（白底 / hover 主题色）
-    ctx.fillStyle = hover ? THEME.accent : "#ffffff";
-    roundRect(b.x, b.y, b.w, b.h, 10);
-    ctx.fill();
-
-    // 边框
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = hover ? THEME.accentLight : "rgba(255,255,255,0.3)";
-    roundRect(b.x, b.y, b.w, b.h, 10);
-    ctx.stroke();
-
-    // 文字
-    ctx.fillStyle = hover ? "#ffffff" : THEME.textMain;
-    ctx.font = "bold 20px system-ui, 'Microsoft YaHei', sans-serif";
-    ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2);
   }
 }
 
@@ -747,99 +399,7 @@ function renderArena() {
 
   ctx.restore();
 
-  renderHud();
-}
-
-// 顶部计分/状态条（固定，不随迷宫平移）
-function renderHud() {
-  ctx.textBaseline = "middle";
-  ctx.font = "bold 18px system-ui, 'Microsoft YaHei', sans-serif";
-  const y = 22;
-
-  for (let i = 0; i < players.length; i++) {
-    const p = players[i];
-    const left = i === 0;
-    const x = left ? 20 : CANVAS.width - 20;
-    ctx.textAlign = left ? "left" : "right";
-
-    // 色块标记（左侧玩家在最左，右侧玩家在最右）
-    ctx.fillStyle = p.color;
-    ctx.beginPath();
-    ctx.arc(left ? x + 7 : x - 7, y, 7, 0, Math.PI * 2);
-    ctx.fill();
-
-    // 名称 + 累计比分 + 状态。比分紧跟名字，左玩家「P1 3」右玩家「3 P2」。
-    ctx.fillStyle = p.alive ? THEME.textMain : THEME.textDim;
-    const score = matchScores[i];
-    // 阵亡标记朝「远离中线」的一侧排，左玩家放右尾、右玩家放左首，左右对称不粘连
-    const text = left
-      ? `${p.label}  ${score}${p.alive ? "" : "  阵亡"}`
-      : `${p.alive ? "" : "阵亡  "}${score}  ${p.label}`;
-    const tx = left ? x + 22 : x - 22;
-    ctx.fillText(text, tx, y);
-  }
-
-  // 对战中底部提示：可随时按 Esc 退回菜单（仅 PLAYING 显示；
-  // ROUND_OVER 时 Esc 语义是「结算后返回」，由横幅另行提示，这里不重复）。
-  if (state === STATE.PLAYING) {
-    ctx.fillStyle = THEME.textDim;
-    ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText("Esc  退出对战", CANVAS.width / 2, CANVAS.height - 16);
-  }
-
-  ctx.textAlign = "left";
-}
-
-function renderRoundOverBanner() {
-  const cx = CANVAS.width / 2;
-  const cy = CANVAS.height / 2;
-
-  // 浅色半透明压层
-  ctx.fillStyle = THEME.overlay;
-  ctx.fillRect(0, 0, CANVAS.width, CANVAS.height);
-
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-
-  // 结果主标题
-  if (winner) {
-    // 胜者色块圆点
-    ctx.fillStyle = winner.color;
-    ctx.beginPath();
-    ctx.arc(cx, cy - 70, 16, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = THEME.textMain;
-    ctx.font = "bold 56px system-ui, 'Microsoft YaHei', sans-serif";
-    ctx.fillText(`${winner.label} 获胜`, cx, cy - 8);
-  } else {
-    ctx.fillStyle = THEME.textMain;
-    ctx.font = "bold 56px system-ui, 'Microsoft YaHei', sans-serif";
-    ctx.fillText("同归于尽", cx, cy - 8);
-  }
-
-  // 倒计时提示：X.X 秒后自动开下一局
-  const secs = Math.max(0, roundOverTimer).toFixed(1);
-  ctx.fillStyle = THEME.textMain;
-  ctx.font = "22px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.fillText(`${secs} 秒后下一局…`, cx, cy + 46);
-
-  // 小字快捷键
-  ctx.fillStyle = THEME.textDim;
-  ctx.font = "15px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.fillText("R  立即开始          Esc  返回菜单", cx, cy + 80);
-}
-
-// 圆角矩形路径（菜单按钮用）。只建路径，由调用方决定 fill/stroke。
-function roundRect(x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
+  renderHud(ctx, { players, matchScores, isPlaying: state === STATE.PLAYING });
 }
 
 requestAnimationFrame(loop);
