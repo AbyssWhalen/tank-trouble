@@ -23,7 +23,10 @@ import { Player } from "./player.js";
 import { generateMaze } from "./maze.js";
 import { circleVsCircle, separateCircles, resolveCircleWalls } from "./collision.js";
 import { fitArena } from "./layout.js";
-import { TankExplosion, PickupFlash } from "./effects.js";
+import {
+  TankExplosion, PickupFlash, ShieldBreak, MuzzleFlash,
+  addShake, updateShake, shakeOffset,
+} from "./effects.js";
 import { PowerupSpawner } from "./powerup.js";
 import {
   isJustPressed, endFrame,
@@ -341,8 +344,12 @@ function updatePlaying(dt) {
   // 3) 开炮：收集新子弹（传 bullets 统计己方在场数实现 maxAlive 限流；
   //    传 walls 做贴墙出膛修正，防炮口越墙穿墙）。
   //    tryFire 返回子弹数组（普通单发 [b]、散射多发、不开火 []），展开 push。
+  //    有弹出膛就在首发出膛点放炮口火光（散射多发同源，一次火光够了）。
   for (let i = 0; i < players.length; i++) {
     const news = players[i].tank.tryFire(bullets, controls[i].fire, maze.walls);
+    if (news.length > 0) {
+      effects.push(new MuzzleFlash(news[0].x, news[0].y, players[i].tank.angle));
+    }
     for (const b of news) bullets.push(b);
   }
 
@@ -359,13 +366,19 @@ function updatePlaying(dt) {
       if (!b.canHit(p.tank)) continue;
       if (circleVsCircle(b.x, b.y, BULLET.radius, p.tank.x, p.tank.y, TANK.radius)) {
         if (p.tank.shield) {
-          // 有护盾：5 秒无敌期，子弹直接消失，坦克无事（护盾不消耗，只有时间到才失效）
+          // 护盾挡一发即碎：消耗护盾、子弹消失、播破盾特效 + 小震动。
+          // 「挡一次」与「限时消失」（tank.update 计时器）两条路先到先算。
+          p.tank.shield = false;
+          p.tank.shieldTimer = 0;
           b.dead = true;
+          effects.push(new ShieldBreak(p.tank.x, p.tank.y, THEME.shieldRing));
+          addShake(3, 0.2);
         } else {
           b.dead = true;
           p.tank.alive = false;
-          // 死亡演出：烟团 + 碎片四散（纯表现，不影响逻辑）
+          // 死亡演出：烟团 + 碎片四散 + 屏幕震动（纯表现，不影响逻辑）
           effects.push(new TankExplosion(p.tank.x, p.tank.y, p.color));
+          addShake(5, 0.3);
         }
         break; // 一颗子弹只打一个
       }
@@ -419,8 +432,9 @@ function updateRoundOver(dt) {
   }
 }
 
-// 推进所有特效，播完的移除。PLAYING 与 ROUND_OVER 共用。
+// 推进所有特效 + 屏幕震动，播完的移除。PLAYING 与 ROUND_OVER 共用。
 function updateEffects(dt) {
+  updateShake(dt);
   for (const e of effects) e.update(dt);
   effects = effects.filter((e) => !e.done);
 }
@@ -461,9 +475,11 @@ function renderArena() {
   const arenaH = maze.rows * CELL_SIZE;
 
   ctx.save();
-  // 先平移到竞技场左上角，再按 fitArena 算出的比例缩放。
+  // 先平移到竞技场左上角（叠加屏幕震动偏移），再按 fitArena 算出的比例缩放。
   // 之后所有绘制都用「世界坐标」（与碰撞/物理同一套），缩放只影响显示不影响物理。
-  ctx.translate(offsetX, offsetY);
+  // 震动在缩放之前叠加 → 幅度不随竞技场缩放变化；暂停画面不抖。
+  const sh = state === STATE.PAUSED ? { x: 0, y: 0 } : shakeOffset();
+  ctx.translate(offsetX + sh.x, offsetY + sh.y);
   ctx.scale(arenaScale, arenaScale);
 
   // 地面

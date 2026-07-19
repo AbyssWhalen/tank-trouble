@@ -232,7 +232,8 @@ export class AiController {
 
     // 策略决策：
     //   自己有护盾（且未快到期）→ 狂暴模式：直接冲锋、不躲弹、放开火力、不捡道具（时间宝贵）
-    //   敌人有护盾（且未快到期）→ 避战模式：不反打、优先捡道具/等护盾消失
+    //   敌人有护盾（且未快到期）→ 避战模式：不贴脸反打、优先捡道具/游走——
+    //     开火不禁（护盾挡一发即碎，远距点破它的盾是赚的），只是不上去换命
     //   敌人有散射 → 防守模式：加强躲避、减少激进追击
     const berserkMode = selfHasShield && !selfShieldExpiring;  // 狂暴：利用无敌冲锋
     const avoidMode = enemyHasShield && !enemyShieldExpiring; // 避战：等护盾消失
@@ -456,10 +457,10 @@ export class AiController {
     //      必中角随距离近大远小；瞄的是预判落点，所以每发都是"算出来会中"
     //   特殊情况：
     //     - 狂暴模式（自己有护盾）：放宽窗口 1.5 倍，激进开火
-    //     - 避战模式（敌人有护盾）：完全不开火——打了也白打
+    //     - 避战模式（敌人有护盾）：照常开火——盾挡一发即碎，先点破它的盾
     //     - 防守模式（敌人有散射）：缩小窗口 40%，更谨慎
     let fire = false;
-    if (!avoidMode && los && gunReady) { // 避战模式禁止开火
+    if (los && gunReady) {
       const hitTol = Math.atan2((TANK.radius + BULLET.radius) * AI.hitSlack, aimDist);
       let skillMod = this.cfg.aimSkill;
       if (berserkMode) skillMod *= 1.5;         // 狂暴：放宽窗口，多打

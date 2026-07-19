@@ -10,6 +10,35 @@
 
 import { EXPLOSION, THEME, TANK } from "./config.js";
 
+// ============================================================
+// 屏幕震动 —— 模块级单例（同时只有一段震动，新震动与旧震动取剩余强度大者）。
+// 纯 render 层：main 在 renderArena 把偏移加进 ctx.translate（缩放之前，
+// 所以震动幅度不随竞技场缩放变化）；PAUSED 状态不施加，暂停画面不抖。
+// ============================================================
+const shake = { t: 0, dur: 0, mag: 0 };
+
+// 触发一段震动：mag 最大偏移（逻辑像素）、dur 时长（秒）
+export function addShake(mag, dur) {
+  const remain = shake.dur > 0 ? shake.mag * (shake.t / shake.dur) : 0;
+  if (mag >= remain) {
+    shake.mag = mag;
+    shake.dur = dur;
+    shake.t = dur;
+  }
+}
+
+// 每帧推进（main 的 updateEffects 里调用，与特效同节奏）
+export function updateShake(dt) {
+  if (shake.t > 0) shake.t = Math.max(0, shake.t - dt);
+}
+
+// 当前帧抖动偏移：线性衰减包络 × 每帧随机方向（高频抖动感）
+export function shakeOffset() {
+  if (shake.t <= 0) return { x: 0, y: 0 };
+  const k = shake.mag * (shake.t / shake.dur);
+  return { x: (Math.random() * 2 - 1) * k, y: (Math.random() * 2 - 1) * k };
+}
+
 // [min, max] 区间取随机数
 function randRange([min, max]) {
   return min + Math.random() * (max - min);
@@ -133,6 +162,61 @@ export class TankExplosion {
 
     ctx.restore();
     ctx.globalAlpha = 1; // 复位，别污染后续绘制
+  }
+}
+
+// ============================================================
+// MuzzleFlash — 开炮炮口火光（~0.12s）
+// 出膛点一束深灰短光线（中间主束 + 两侧斜线），快速淡出。
+// 深灰配浅场地贴原版极简风，不喧宾夺主，只给「炮响了」的顿挫感。
+// ============================================================
+export class MuzzleFlash {
+  // x, y: 炮口位置（首发子弹的出膛点）；angle: 炮管朝向
+  constructor(x, y, angle) {
+    this.x = x;
+    this.y = y;
+    this.angle = angle;
+    this.age = 0;
+    this.duration = 0.12;
+  }
+
+  get done() {
+    return this.age >= this.duration;
+  }
+
+  update(dt) {
+    this.age += dt;
+  }
+
+  render(ctx) {
+    if (this.done) return;
+    const p = this.age / this.duration;
+    const len = 10 + p * 6; // 光束随时间略外扩
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.angle);
+    ctx.globalAlpha = (1 - p) * 0.9;
+    ctx.strokeStyle = "#2b2b3a";
+    ctx.lineCap = "round";
+
+    // 中间主光束
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(len, 0);
+    ctx.stroke();
+    // 两侧短斜线
+    ctx.lineWidth = 2;
+    for (const s of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(1, 0);
+      ctx.lineTo(len * 0.55, s * len * 0.38);
+      ctx.stroke();
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.restore();
   }
 }
 

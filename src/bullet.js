@@ -21,6 +21,7 @@ export class Bullet {
     this.bounces = 0;
     this.age = 0;        // 已存活秒数
     this.dead = false;   // true 时 main 会从数组移除
+    this.trail = [];     // 最近几帧的位置（拖尾渲染用，反弹处自然拐弯）
   }
 
   // dt: 距上一帧秒数；walls: 墙线段数组
@@ -32,6 +33,10 @@ export class Bullet {
       this.dead = true;
       return;
     }
+
+    // 拖尾采样：记录移动前的位置（撞墙修正后的最终位置由下一帧记录）
+    this.trail.push({ x: this.x, y: this.y });
+    if (this.trail.length > 6) this.trail.shift();
 
     // 沿速度移动
     this.x += this.vx * dt;
@@ -76,6 +81,19 @@ export class Bullet {
 
   render(ctx) {
     if (this.dead) return;
+
+    // 拖尾：几个渐隐渐小的灰点垫在弹体后面，浅色场地上似淡淡的烟迹。
+    // 反弹瞬间历史点在墙角自然拐弯，跳弹轨迹一眼可读。
+    for (let i = 0; i < this.trail.length; i++) {
+      const t = this.trail[i];
+      const f = (i + 1) / (this.trail.length + 1); // 越新（越靠近弹体）越实
+      ctx.globalAlpha = 0.14 * f;
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, BULLET.radius * (0.4 + 0.5 * f), 0, Math.PI * 2);
+      ctx.fillStyle = THEME.bullet;
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
 
     // 原版风格：朴素的实心黑色小圆点，无描边、无发光（贴合截图）。
     // 不区分归属——原版子弹本就是不分颜色的黑点，满屏跳弹谁的都一样致命。
