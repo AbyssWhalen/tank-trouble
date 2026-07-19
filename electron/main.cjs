@@ -1,6 +1,15 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
 
+// 开发自检开关:CDP 驱动的后台验证(窗口被终端完全遮挡时)需要关掉
+// Chromium 的「窗口被遮挡即冻结渲染」优化,否则 rAF 停摆、页面无法驱动。
+// 仅设置 TANK_DEV_KEEP_PAINTING=1 时生效,正常启动/打包运行零影响。
+if (process.env.TANK_DEV_KEEP_PAINTING) {
+  app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+  app.commandLine.appendSwitch('disable-renderer-backgrounding');
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1000,
