@@ -11,11 +11,15 @@ Local multiplayer tank combat game with procedural maze generation, bullet ricoc
 - 🎮 **双人对战 + 人机模式** | PvP & PvE modes
 - 🗺️ **随机迷宫生成** | Procedural maze generation with 3 size tiers
 - 💥 **子弹反弹物理** | Realistic bullet ricochet off walls
-- 🎁 **四种道具** | 4 power-ups: 散射 / 护盾 / 穿墙弹 / 地雷 | Scatter, Shield, Pierce & Mine
+- 🎁 **四种道具·菜单可自选组合** | 4 power-ups, individually toggleable:
+  - 散射（扇形三连发） | Scatter shot
+  - 护盾（挡一发即碎） | One-hit shield
+  - 激光（瞬时射线沿墙反弹 + 预瞄虚线） | Bouncing laser with aim preview
+  - 地雷（独立道具键布雷，布防后隐形） | Stealth mines on a dedicated key
 - 🤖 **三档难度 AI** | AI with Easy/Normal/Hard difficulty levels
   - 智能躲弹 + 拦截预判射击 | Adaptive dodging + predictive aim
   - 近战反打决策 | Close-combat counter-attack logic
-  - 识别对手道具调整策略、绕雷寻路、隔墙狙击 | Reads opponent power-ups, avoids mines, snipes through walls
+  - 识别对手道具调整策略、绕雷寻路、边打边布雷 | Reads opponent power-ups, avoids mines, drops mines while fighting
 - ⌨️ **键位自定义** | Rebindable controls (persisted locally)
 - 🖥️ **F11 全屏** | Fullscreen toggle with state memory
 - ✨ **手感特效** | Screen shake, muzzle flash, bullet trails & explosions
@@ -33,10 +37,12 @@ Default bindings below — rebind them via the "键" button at the bottom-left o
 ### 玩家 1 | Player 1
 - **移动** | Move: `W` `A` `S` `D`
 - **开炮** | Fire: `Space`
+- **放道具** | Deploy (mines): `E`
 
 ### 玩家 2 | Player 2
 - **移动** | Move: `↑` `←` `↓` `→`
 - **开炮** | Fire: `Enter`
+- **放道具** | Deploy (mines): `右Shift | Right Shift`
 
 ### 通用 | Common
 - **暂停 / 返回菜单** | Pause / back to menu: `Esc`
@@ -94,11 +100,13 @@ tank-trouble/
 │   ├── maze.js       # 迷宫生成 | Maze generation
 │   ├── tank.js       # 坦克物理 | Tank physics
 │   ├── bullet.js     # 子弹 + 反弹 | Bullet & ricochet
+│   ├── laser.js      # 激光射线 | Bouncing laser
 │   ├── powerup.js    # 道具刷新 | Power-up spawning
 │   ├── mine.js       # 地雷 | Mines
 │   ├── settings.js   # 设置持久化 | Settings persistence
 │   ├── collision.js  # 碰撞检测 | Collision detection
 │   └── effects.js    # 视觉特效 | Visual effects
+├── scripts/          # 冒烟测试 | Smoke tests (npm run smoke)
 ├── electron/         # Electron 主进程 | Electron main process
 └── index.html        # 渲染进程入口 | Renderer entry
 ```
@@ -126,7 +134,8 @@ Zero runtime dependencies, pure frontend implementation.
 - **阶段 8**：道具系统（散射 / 护盾）+ AI 识别对手道具 + 暂停功能
 - **阶段 9**：界面层重构 + 键位自定义（本地持久化）+ F11 全屏
 - **阶段 10**：护盾改「挡一发即碎」+ 屏幕震动 / 炮口火光 / 子弹拖尾
-- **阶段 11**：新道具穿墙弹 & 地雷 + AI 避雷 / 布雷 / 隔墙狙击
+- **阶段 11**：新道具穿墙弹 & 地雷 + AI 避雷 / 布雷
+- **阶段 12**：独立道具键 + 激光射线（预瞄虚线）替换穿墙弹 + 隐形地雷 + 道具自选组合 + 冒烟测试
 
 ---
 

@@ -5,6 +5,7 @@
   "main": "electron/main.cjs",
   "scripts": {
     "start": "electron .",
+    "smoke": "node scripts/smoke.mjs",
     "dist": "electron-builder --win"
   },
   "author": "Whalen",
