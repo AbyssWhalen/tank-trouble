@@ -26,18 +26,32 @@ export class Mine {
     return this.age >= POWERUP.mine.armDelay;
   }
 
+  // 可见度（0~1）：布防期半透明 → 警戒后短暂实色亮相 → 淡出至完全隐形。
+  // 抽成纯方法供渲染与冒烟测试共用。隐形只是不画——引爆判定（main）照常，
+  // 同屏约束下主人也看不见，布雷位置靠记忆。
+  visibility() {
+    const { armDelay, visibleTime, fadeTime } = POWERUP.mine;
+    if (this.age < armDelay) return 0.45;
+    const armedFor = this.age - armDelay;
+    if (armedFor < visibleTime) return 0.95;
+    return Math.max(0, 0.95 * (1 - (armedFor - visibleTime) / fadeTime));
+  }
+
   update(dt) {
     this.age += dt;
   }
 
   render(ctx) {
+    const vis = this.visibility();
+    if (vis <= 0) return; // 完全隐形：跳过绘制（省事也省性能）
+
     const r = POWERUP.mine.discRadius;
 
     ctx.save();
     ctx.translate(this.x, this.y);
 
-    // 雷盘：布防期半透明（看得见但知道还没警戒），警戒后实色
-    ctx.globalAlpha = this.armed ? 0.95 : 0.45;
+    // 雷盘：布防期半透明（看得见但知道还没警戒），警戒后实色亮相再淡出
+    ctx.globalAlpha = vis;
     ctx.fillStyle = THEME.mineBody;
     ctx.beginPath();
     ctx.arc(0, 0, r, 0, Math.PI * 2);
@@ -56,12 +70,12 @@ export class Mine {
     ctx.lineTo(0, r * 0.6);
     ctx.stroke();
 
-    // 中心指示灯：警戒后红色 sin 闪烁，布防期灰色常亮
+    // 中心指示灯：警戒后红色 sin 闪烁，布防期灰色常亮（都随整体可见度衰减）
     if (this.armed) {
-      ctx.globalAlpha = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(this.age * 10));
+      ctx.globalAlpha = vis * (0.4 + 0.6 * (0.5 + 0.5 * Math.sin(this.age * 10)));
       ctx.fillStyle = THEME.mineBlink;
     } else {
-      ctx.globalAlpha = 0.6;
+      ctx.globalAlpha = vis * 0.6;
       ctx.fillStyle = "#9a9aa5";
     }
     ctx.beginPath();

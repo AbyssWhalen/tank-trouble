@@ -29,6 +29,7 @@ export class Tank {
     this.scatterShots = 0;   // 剩余「扇形开火」次数，>0 时 tryFire 打扇形并递减
     this.laserShots = 0;     // 剩余激光发数，>0 时开火变瞬时射线（结算在 main）
     this.mineCharges = 0;    // 剩余布雷次数，>0 时道具键在车尾放雷
+    this.mineHoldTimer = 0;  // 持雷超时计时（秒）：归零清空存货，部署/拾取时刷新
     this.shield = false;     // 是否持有护盾（挡一次致命伤害）
     this.shieldTimer = 0;    // 护盾剩余时间（秒），到点自动消失防一直龟
   }
@@ -42,6 +43,13 @@ export class Tank {
     if (this.cooldown > 0) this.cooldown -= dt;
     // 部署冷却递减
     if (this.deployCooldown > 0) this.deployCooldown -= dt;
+
+    // 持雷超时：拾取后一直不部署，存货作废（防捏着雷白占武器槽不消耗）。
+    // 每次成功部署会刷新计时——积极在用就不没收。
+    if (this.mineCharges > 0) {
+      this.mineHoldTimer -= dt;
+      if (this.mineHoldTimer <= 0) this.mineCharges = 0;
+    }
 
     // 护盾限时流逝：到点自动消失（防止捡到盾就一直龟着不出来打）。
     // 「挡一次伤害」的消耗在 main 的击中判定里做，两条触发先到先算。
@@ -135,6 +143,7 @@ export class Tank {
 
     this.deployCooldown = 0.25;
     this.mineCharges--;
+    this.mineHoldTimer = POWERUP.mine.holdTimeout; // 部署刷新持雷计时
     // 落点沿车尾方向探出，贴墙时 resolveCircleWalls 修回可用位置
     const backDist = TANK.radius + POWERUP.mine.discRadius + 4;
     let mx = this.x - Math.cos(this.angle) * backDist;
@@ -204,6 +213,7 @@ export class Tank {
       this.scatterShots = 0;
       this.laserShots = 0;
       this.mineCharges += POWERUP.mine.charges;
+      this.mineHoldTimer = POWERUP.mine.holdTimeout; // 拾取起算持雷超时
     } else if (type === "shield") {
       this.shield = true;
       this.shieldTimer = POWERUP.shield.duration;
