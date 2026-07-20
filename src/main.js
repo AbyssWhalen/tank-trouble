@@ -28,7 +28,6 @@ import {
   addShake, updateShake, shakeOffset,
 } from "./effects.js";
 import { PowerupSpawner } from "./powerup.js";
-import { Mine } from "./mine.js";
 import {
   isJustPressed, endFrame,
   bindMouse, getMousePos, isClicked, getAnyJustPressed,
@@ -280,8 +279,9 @@ function updateRebind(dt) {
 }
 
 // code 是否已被前两套键位占用，返回 { player, label }（动作中文名）或 null
+// code 是否已被前两套键位占用，返回 { player, label }（动作中文名）或 null
 function findBindingConflict(code) {
-  const labels = { forward: "前进", back: "后退", left: "左转", right: "右转", fire: "开火" };
+  const labels = { forward: "前进", back: "后退", left: "左转", right: "右转", fire: "开火", special: "道具" };
   for (let p = 0; p < 2; p++) {
     for (const [action, label] of Object.entries(labels)) {
       if (KEY_BINDINGS[p][action] === code) return { player: p, label };
@@ -372,19 +372,17 @@ function updatePlaying(dt) {
   }
   mines = mines.filter((m) => !m.exploded);
 
-  // 3) 开炮：收集新子弹（传 bullets 统计己方在场数实现 maxAlive 限流；
-  //    传 walls 做贴墙出膛修正，防炮口越墙穿墙）。
-  //    tryFire 返回数组可能是子弹（单发/散射多发）或地雷（持雷时开火=布雷），
-  //    按类型分流；只有真开炮（产出子弹）才放炮口火光，布雷没有炮口一说。
+  // 3) 开炮 + 部署：开火键产子弹（单发/散射，maxAlive 限流 + 贴墙出膛修正），
+  //    道具键走 tryDeploy 部署地雷——射击与部署解耦，各有冷却互不影响。
   for (let i = 0; i < players.length; i++) {
     const news = players[i].tank.tryFire(bullets, controls[i].fire, maze.walls);
-    if (news.length > 0 && !(news[0] instanceof Mine)) {
+    if (news.length > 0) {
       effects.push(new MuzzleFlash(news[0].x, news[0].y, players[i].tank.angle));
     }
-    for (const e of news) {
-      if (e instanceof Mine) mines.push(e);
-      else bullets.push(e);
-    }
+    for (const b of news) bullets.push(b);
+
+    const mine = players[i].tank.tryDeploy(controls[i].special, maze.walls);
+    if (mine) mines.push(mine);
   }
 
   // 4) 子弹更新（移动 + 反弹）

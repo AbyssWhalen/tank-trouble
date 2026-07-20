@@ -50,14 +50,16 @@ const helpBtn = { x: CANVAS.width - 56, y: CANVAS.height - 56, r: 20 };
 const rebindBtn = { x: 56, y: CANVAS.height - 56, r: 20 };
 
 // —— 键位设置面板（居中浮窗）：布局常量 + 每个键位 chip 的命中矩形 ——
-const REBIND_PANEL = { w: 620, h: 500 };
+const REBIND_PANEL = { w: 620, h: 540 };
 REBIND_PANEL.x = (CANVAS.width - REBIND_PANEL.w) / 2;
 REBIND_PANEL.y = (CANVAS.height - REBIND_PANEL.h) / 2;
 
-const REBIND_ACTIONS = ["forward", "back", "left", "right", "fire"];
-const ACTION_LABELS = { forward: "前进", back: "后退", left: "左转", right: "右转", fire: "开火" };
+const REBIND_ACTIONS = ["forward", "back", "left", "right", "fire", "special"];
+const ACTION_LABELS = {
+  forward: "前进", back: "后退", left: "左转", right: "右转", fire: "开火", special: "道具",
+};
 
-// 键位 chip 命中表：两列（P1/P2）× 5 行，静态算好
+// 键位 chip 命中表：两列（P1/P2）× 6 行，静态算好
 const rebindChips = [];
 for (let p = 0; p < 2; p++) {
   REBIND_ACTIONS.forEach((action, row) => {
@@ -65,7 +67,7 @@ for (let p = 0; p < 2; p++) {
       player: p,
       action,
       x: REBIND_PANEL.x + 110 + p * 270,
-      y: REBIND_PANEL.y + 128 + row * 56,
+      y: REBIND_PANEL.y + 120 + row * 50,
       w: 140,
       h: 36,
     });
@@ -282,7 +284,7 @@ export function renderMenu(ctx, view) {
 
 // 操作说明卡片：左右分栏（P1 | P2），键位从当前 KEY_BINDINGS 动态生成
 function renderControlCards(ctx, cx) {
-  const cardW = 230, cardH = 78, gap = 24;
+  const cardW = 230, cardH = 96, gap = 24;
   const totalW = cardW * 2 + gap;
   const startX = cx - totalW / 2;
   const y = 200;
@@ -292,6 +294,7 @@ function renderControlCards(ctx, cx) {
     color: PLAYER_COLORS[i],
     move: moveKeysLabel(i),
     fire: `${keyLabel(KEY_BINDINGS[i].fire)} 开炮`,
+    special: `${keyLabel(KEY_BINDINGS[i].special)} 放道具`,
   }));
 
   cards.forEach((card, i) => {
@@ -315,13 +318,14 @@ function renderControlCards(ctx, cx) {
     ctx.textAlign = "left";
     ctx.fillStyle = THEME.textMain;
     ctx.font = "bold 15px system-ui, 'Microsoft YaHei', sans-serif";
-    ctx.fillText(card.title, x + 54, y + 24);
+    ctx.fillText(card.title, x + 54, y + 22);
 
-    // 键位
+    // 键位（移动 / 开炮 / 道具三行）
     ctx.fillStyle = THEME.textDim;
     ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
-    ctx.fillText(card.move + "  移动", x + 54, y + 44);
-    ctx.fillText(card.fire, x + 54, y + 62);
+    ctx.fillText(card.move + "  移动", x + 54, y + 42);
+    ctx.fillText(card.fire, x + 54, y + 60);
+    ctx.fillText(card.special, x + 54, y + 78);
   });
   ctx.textAlign = "center";
 }
@@ -520,8 +524,8 @@ function renderHelpOverlay(ctx, cx) {
   };
 
   section("操作");
-  line(`玩家 1：${moveKeysLabel(0)} 移动，${keyLabel(KEY_BINDINGS[0].fire)} 开炮`);
-  line(`玩家 2：${moveKeysLabel(1)} 移动，${keyLabel(KEY_BINDINGS[1].fire)} 开炮`);
+  line(`玩家 1：${moveKeysLabel(0)} 移动，${keyLabel(KEY_BINDINGS[0].fire)} 开炮，${keyLabel(KEY_BINDINGS[0].special)} 放道具`);
+  line(`玩家 2：${moveKeysLabel(1)} 移动，${keyLabel(KEY_BINDINGS[1].fire)} 开炮，${keyLabel(KEY_BINDINGS[1].special)} 放道具`);
   ly += 6;
 
   section("规则");
@@ -533,7 +537,7 @@ function renderHelpOverlay(ctx, cx) {
   line("护盾：挡下一发致命攻击即碎，或 5 秒后自动消失（先到先算）");
   line("散射：连续 3 次扇形开火（一炮 3 发）");
   line("穿墙：接下来 2 发紫色子弹可穿透一堵内墙（边界墙除外）");
-  line("地雷：接下来 2 次开火改为车尾布雷，1 秒布防后近敌即炸（不认主人）");
+  line("地雷：捡取后按道具键在车尾布雷（共 2 颗），1 秒布防后近敌即炸（不认主人）");
   ly += 6;
 
   section("快捷键");

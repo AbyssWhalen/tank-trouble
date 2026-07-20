@@ -21,6 +21,7 @@ export class Tank {
     this.color = color;
     this.alive = true;
     this.cooldown = 0;
+    this.deployCooldown = 0;  // 道具键部署冷却（防一帧重复触发，与开火冷却无关）
 
     // —— 道具状态（捡到道具时由 applyPowerup 设置；无道具时全为初值）——
     // scatter/pierce/mine 同属「武器改装槽」互斥（异类拾取清旧换新，同类叠加），
@@ -39,6 +40,8 @@ export class Tank {
 
     // 开炮冷却递减
     if (this.cooldown > 0) this.cooldown -= dt;
+    // 部署冷却递减
+    if (this.deployCooldown > 0) this.deployCooldown -= dt;
 
     // 护盾限时流逝：到点自动消失（防止捡到盾就一直龟着不出来打）。
     // 「挡一次伤害」的消耗在 main 的击中判定里做，两条触发先到先算。
@@ -86,9 +89,8 @@ export class Tank {
 
     const scattering = this.scatterShots > 0;
 
-    // 同屏己方存活子弹数达上限则不发射（散射绕开：见上方注释；
-    // 布雷也绕开——放雷不产生子弹，不该被自己在场的弹药卡住）
-    if (!scattering && this.mineCharges === 0 && bullets) {
+    // 同屏己方存活子弹数达上限则不发射（散射绕开：见上方注释）
+    if (!scattering && bullets) {
       let mine = 0;
       for (const b of bullets) {
         if (b.owner === this && !b.dead) mine++;
@@ -110,21 +112,6 @@ export class Tank {
       return out;
     }
 
-    // 地雷：开火键改为在车尾放雷（替代该次射击，不产生子弹、不占 maxAlive）。
-    // 落点沿车尾方向探出，贴墙时 resolveCircleWalls 修回可用位置。
-    if (this.mineCharges > 0) {
-      this.mineCharges--;
-      const backDist = TANK.radius + POWERUP.mine.discRadius + 4;
-      let mx = this.x - Math.cos(this.angle) * backDist;
-      let my = this.y - Math.sin(this.angle) * backDist;
-      if (walls && walls.length) {
-        const fixed = resolveCircleWalls(mx, my, POWERUP.mine.discRadius, walls);
-        mx = fixed.x;
-        my = fixed.y;
-      }
-      return [new Mine(mx, my, this)];
-    }
-
     // 穿墙弹：普通单发弹道（受 maxAlive 限流，上面已查过），只是弹上带
     // 「可穿透 1 堵内墙」的额度；打完存货自动恢复普通弹
     if (this.pierceShots > 0) {
@@ -133,6 +120,31 @@ export class Tank {
     }
 
     return [this.spawnBullet(this.angle, walls)];
+  }
+
+  // 部署道具（special 键，独立于开火）：持雷时在车尾放一颗雷。
+  // 开火键=射击、道具键=部署，两者各有冷却互不影响——持雷也能照常开炮。
+  // 部署不产生子弹、不受 maxAlive 限流；deployCooldown 只防一帧内重复触发，
+  // 玩家有意快速连按仍可短间隔连丢（快速布阵是合法玩法）。
+  // 返回 Mine 或 null，由 main 收进 mines[]。
+  tryDeploy(wantSpecial, walls) {
+    if (!this.alive) return null;
+    if (!wantSpecial) return null;
+    if (this.deployCooldown > 0) return null;
+    if (this.mineCharges <= 0) return null;
+
+    this.deployCooldown = 0.25;
+    this.mineCharges--;
+    // 落点沿车尾方向探出，贴墙时 resolveCircleWalls 修回可用位置
+    const backDist = TANK.radius + POWERUP.mine.discRadius + 4;
+    let mx = this.x - Math.cos(this.angle) * backDist;
+    let my = this.y - Math.sin(this.angle) * backDist;
+    if (walls && walls.length) {
+      const fixed = resolveCircleWalls(mx, my, POWERUP.mine.discRadius, walls);
+      mx = fixed.x;
+      my = fixed.y;
+    }
+    return new Mine(mx, my, this);
   }
 
   // 沿给定 heading 生成一发子弹，含贴墙出膛修正（防穿墙）。

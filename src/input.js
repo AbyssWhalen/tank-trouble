@@ -76,11 +76,12 @@ export function getAnyJustPressed() {
   return null;
 }
 
-// 把键位表转成统一控制指令 { turn, move, fire }——
+// 把键位表转成统一控制指令 { turn, move, fire, special }——
 // 这是「控制源抽象」的键盘实现：Tank 只消费指令不读键盘，
 // AI 玩家由 ai.js 产出同构指令（接口与此对齐），主循环对人/AI 无感知。
 //   turn: -1 左转 / 1 右转 / 0 不转    move: 1 前进 / -1 后退 / 0 停
 //   fire: 边沿触发（本帧刚按下才 true，保持"按一下打一发"的手感）
+//   special: 边沿触发，道具键（部署类道具，如布雷）
 export function readControls(keys) {
   let turn = 0;
   if (isDown(keys.left)) turn -= 1;
@@ -90,7 +91,12 @@ export function readControls(keys) {
   if (isDown(keys.forward)) move += 1;
   if (isDown(keys.back)) move -= 1;
 
-  return { turn, move, fire: isJustPressed(keys.fire) };
+  return {
+    turn,
+    move,
+    fire: isJustPressed(keys.fire),
+    special: isJustPressed(keys.special),
+  };
 }
 
 // 鼠标当前坐标（canvas 内部像素坐标），菜单命中检测用

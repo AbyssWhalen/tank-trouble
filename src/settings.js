@@ -15,7 +15,7 @@
 import { KEY_BINDINGS } from "./config.js";
 
 const STORE_KEY = "tank-trouble.settings.v1";
-const ACTIONS = ["forward", "back", "left", "right", "fire"];
+const ACTIONS = ["forward", "back", "left", "right", "fire", "special"];
 
 // 默认键位快照：必须在 initSettings 覆写之前抓，故放模块顶层
 export const DEFAULT_BINDINGS = Object.freeze(

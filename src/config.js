@@ -91,12 +91,13 @@ export const PLAYER_COLORS = [
 ];
 
 // 多套键位：每个玩家一组。值为 KeyboardEvent.code。
-// forward/back/left/right/fire
+// forward/back/left/right/fire/special（special=道具键：部署类道具用，如布雷；
+// 开火键=射击，道具键=部署，语义分离。P1 取 E 贴 WASD 手位、P2 取右 Shift 贴方向键手位）
 export const KEY_BINDINGS = [
-  { forward: "KeyW", back: "KeyS", left: "KeyA", right: "KeyD", fire: "Space" },
-  { forward: "ArrowUp", back: "ArrowDown", left: "ArrowLeft", right: "ArrowRight", fire: "Enter" },
-  { forward: "KeyI", back: "KeyK", left: "KeyJ", right: "KeyL", fire: "KeyU" },
-  { forward: "Numpad8", back: "Numpad5", left: "Numpad4", right: "Numpad6", fire: "Numpad0" },
+  { forward: "KeyW", back: "KeyS", left: "KeyA", right: "KeyD", fire: "Space", special: "KeyE" },
+  { forward: "ArrowUp", back: "ArrowDown", left: "ArrowLeft", right: "ArrowRight", fire: "Enter", special: "ShiftRight" },
+  { forward: "KeyI", back: "KeyK", left: "KeyJ", right: "KeyL", fire: "KeyU", special: "KeyO" },
+  { forward: "Numpad8", back: "Numpad5", left: "Numpad4", right: "Numpad6", fire: "Numpad0", special: "NumpadAdd" },
 ];
 
 // 回合结束到下一局重开的延迟（秒）

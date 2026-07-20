@@ -236,13 +236,15 @@ export class AiController {
     this.anchorY = 0;
     this.unstickTimer = 0;   // >0 表示正在脱困机动
     this.unstickTurn = 1;    // 脱困时的转向（随机定一边，避免左右横跳）
+
+    this.mineDropTimer = 0;  // 布雷决策节流（AI 指令无边沿，防连帧连丢）
   }
 
-  // 每帧调用。world = { maze, players, bullets }（bullets 暂未用，留给躲弹）。
-  // 返回 { turn, move, fire }，与 input.readControls 同构。
+  // 每帧调用。world = { maze, players, bullets, powerups, mines }。
+  // 返回 { turn, move, fire, special }，与 input.readControls 同构。
   update(dt, world) {
     const self = this.player.tank;
-    const idle = { turn: 0, move: 0, fire: false };
+    const idle = { turn: 0, move: 0, fire: false, special: false };
     if (!self.alive) return idle;
 
     // 目标：场上另一个存活玩家（1v1 就一个；没有则待机）
@@ -348,7 +350,7 @@ export class AiController {
         this.unstickTimer = 0; // 反打抢占，立即转入交战
       } else {
         this.unstickTimer -= dt;
-        return { turn: this.unstickTurn, move: -1, fire: false };
+        return { turn: this.unstickTurn, move: -1, fire: false, special: false };
       }
     }
 
@@ -505,22 +507,11 @@ export class AiController {
     //   ③ 质量门：开火窗口 = 几何必中角 × 难度 aimSkill，全部对拦截点评估。
     //      必中角随距离近大远小；瞄的是预判落点，所以每发都是"算出来会中"
     //   特殊情况：
-    //     - 持雷（武器槽被地雷占用）：开火键=布雷，走独立的布雷时机决策
     //     - 狂暴模式（自己有护盾）：放宽窗口 1.5 倍，激进开火
     //     - 避战模式（敌人有护盾）：照常开火——盾挡一发即碎，先点破它的盾
     //     - 防守模式（敌人有散射）：缩小窗口 40%，更谨慎
     let fire = false;
-    if (self.mineCharges > 0) {
-      // 持雷时开火键=布雷（硬语义）：敌人近身（2 格内）就在车尾丢雷——
-      // 近战纠缠中丢下的雷对双方都是威胁，但自己有上面的避雷移动逻辑
-      // 会绕开，人类对手不一定记得。fireTimer 节奏门防两颗一口气全丢；
-      // 不走瞄准质量门（布雷不是射击）、不占弹药预算（雷不进 bullets）。
-      // 丢完存货自动回归炮弹逻辑。
-      if (this.fireTimer <= 0 && enemyDist < CELL_SIZE * 2) {
-        fire = true;
-        this.fireTimer = randRange(this.cfg.fireCooldown);
-      }
-    } else if (los && gunReady) {
+    if (los && gunReady) {
       const hitTol = Math.atan2((TANK.radius + BULLET.radius) * AI.hitSlack, aimDist);
       let skillMod = this.cfg.aimSkill;
       if (berserkMode) skillMod *= 1.5;         // 狂暴：放宽窗口，多打
@@ -546,7 +537,19 @@ export class AiController {
       }
     }
 
-    return { turn, move, fire };
+    // —— 6) 部署道具（special 位，与开火完全解耦）——
+    // 持雷且敌人逼近（2 格内）就在车尾丢雷：近战纠缠中丢下的雷对双方都是
+    // 威胁，但自己有上面的避雷移动逻辑会绕开，人类对手不一定记得。
+    // AI 指令没有"边沿触发"概念，用 mineDropTimer 节流防连帧连丢
+    // （tryDeploy 侧另有 0.25s 部署冷却兜底）。
+    let special = false;
+    this.mineDropTimer -= dt;
+    if (self.mineCharges > 0 && this.mineDropTimer <= 0 && enemyDist < CELL_SIZE * 2) {
+      special = true;
+      this.mineDropTimer = 1.0;
+    }
+
+    return { turn, move, fire, special };
   }
 
   // 预判最先命中自己的子弹：对每颗活子弹按当前速度直线外推（忽略未来反弹，
