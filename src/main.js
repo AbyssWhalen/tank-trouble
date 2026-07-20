@@ -37,7 +37,10 @@ import {
   renderMenu, renderPauseOverlay, renderHud, renderRoundOverBanner,
   renderRebindOverlay, menuAction, pauseAction, rebindAction, keyLabel,
 } from "./ui.js";
-import { initSettings, saveBindings, resetBindings } from "./settings.js";
+import {
+  initSettings, saveBindings, resetBindings,
+  loadEnabledPowerups, saveEnabledPowerups,
+} from "./settings.js";
 
 const canvas = document.getElementById("game-canvas");
 const ctx = canvas.getContext("2d");
@@ -94,7 +97,9 @@ let currentMode = "pvp";       // 当前对局模式，R 重开时复用
 let matchScores = [0, 0];      // 各玩家累计胜场，index 对齐 players
 let roundOverTimer = 0;        // ROUND_OVER 倒计时（秒），归零自动重开
 let aiLevel = "normal";        // 选中的 AI 难度档（菜单 chip 单选），开局/R 重开沿用
-let powerupsOn = true;         // 道具开关（菜单 toggle），开局/R 重开沿用
+// 启用的道具类型集合（菜单多选 chip；空集=整局无道具）。
+// 初始从 localStorage 读上次组合，没存过默认全启;变化即写盘。
+let enabledPowerups = new Set(loadEnabledPowerups() ?? POWERUP.types);
 let showHelp = false;          // 玩法说明浮窗是否显示（叠在菜单上的浮层）
 
 // —— 键位设置面板状态（菜单子状态）——
@@ -147,8 +152,9 @@ function setupRound(mode) {
   effects = [];
   powerups = [];
   mines = [];
-  // 道具刷新器：开关关闭则传空种类，整局永不刷（spawner 内部 types 为空直接 return）
-  spawner = new PowerupSpawner(powerupsOn ? POWERUP.types : []);
+  // 道具刷新器：只喂启用的类型（保持 POWERUP.types 定义顺序），
+  // 全没启用则传空数组，整局永不刷（spawner 内部 types 为空直接 return）
+  spawner = new PowerupSpawner(POWERUP.types.filter((t) => enabledPowerups.has(t)));
   winner = null;
   state = STATE.PLAYING;
 }
@@ -207,8 +213,11 @@ function updateMenu(dt) {
     case "aiLevel":
       aiLevel = action.key;
       break;
-    case "powerups":
-      powerupsOn = action.on;
+    case "togglePowerup":
+      // 多选 toggle：点亮/熄灭该类道具,组合即时写盘(下局生效)
+      if (enabledPowerups.has(action.key)) enabledPowerups.delete(action.key);
+      else enabledPowerups.add(action.key);
+      saveEnabledPowerups([...enabledPowerups]);
       break;
     case "mode":
       startMatch(action.mode);
@@ -530,7 +539,7 @@ function render() {
 
   switch (state) {
     case STATE.MENU:
-      renderMenu(ctx, { mouse: getMousePos(), aiLevel, powerupsOn, showHelp });
+      renderMenu(ctx, { mouse: getMousePos(), aiLevel, enabledPowerups, showHelp });
       if (rebind.open) {
         renderRebindOverlay(ctx, {
           mouse: getMousePos(),

@@ -7,7 +7,7 @@
 // ============================================================
 
 import {
-  CANVAS, THEME, AI_DIFFICULTY, PLAYER_COLORS, KEY_BINDINGS,
+  CANVAS, THEME, AI_DIFFICULTY, PLAYER_COLORS, KEY_BINDINGS, POWERUP,
 } from "./config.js";
 
 // —— 菜单按钮（逻辑坐标，不随迷宫平移）——
@@ -30,13 +30,15 @@ const difficultyChips = chipKeys.map((key, i) => ({
   h: CHIP_H,
 }));
 
-// —— 道具开关 chip（难度 chip 下方一排开/关，与难度选择同款样式）——
+// —— 道具类型 chip（难度 chip 下方一排，多选 toggle：选中=该类道具会刷新）——
+// 由 POWERUP.types 生成，新道具加进 config 自动出现在菜单；全不选=整局无道具。
+const POWERUP_LABELS = { scatter: "散射", shield: "护盾", laser: "激光", mine: "地雷" };
 const POW_CHIP_W = 88, POW_CHIP_H = 32, POW_CHIP_GAP = 14;
-const powChipKeys = [true, false]; // 开 / 关
-const POW_CHIPS_X = (CANVAS.width - (2 * POW_CHIP_W + POW_CHIP_GAP)) / 2;
-const powupChips = powChipKeys.map((on, i) => ({
-  on,
-  label: on ? "开启" : "关闭",
+const POW_CHIPS_X =
+  (CANVAS.width - (POWERUP.types.length * POW_CHIP_W + (POWERUP.types.length - 1) * POW_CHIP_GAP)) / 2;
+const powupChips = POWERUP.types.map((key, i) => ({
+  key,
+  label: POWERUP_LABELS[key] || key,
   x: POW_CHIPS_X + i * (POW_CHIP_W + POW_CHIP_GAP),
   y: 544, // 难度 chip 底边 526 再留 18px
   w: POW_CHIP_W,
@@ -154,7 +156,7 @@ export function menuAction(mx, my, { showHelp }) {
     if (hitRect(mx, my, c)) return { type: "aiLevel", key: c.key };
   }
   for (const c of powupChips) {
-    if (hitRect(mx, my, c)) return { type: "powerups", on: c.on };
+    if (hitRect(mx, my, c)) return { type: "togglePowerup", key: c.key };
   }
   for (const b of buttons) {
     if (b.enabled && hitRect(mx, my, b)) return { type: "mode", mode: b.mode };
@@ -189,7 +191,7 @@ export function rebindAction(mx, my) {
 // 绘制
 // ============================================================
 
-// 主菜单。view = { mouse:{x,y}, aiLevel, powerupsOn, showHelp }
+// 主菜单。view = { mouse:{x,y}, aiLevel, enabledPowerups:Set, showHelp }
 export function renderMenu(ctx, view) {
   const cx = CANVAS.width / 2;
   const { x: mx, y: my } = view.mouse;
@@ -256,14 +258,14 @@ export function renderMenu(ctx, view) {
     renderChip(ctx, c, AI_DIFFICULTY[c.key].label, selected, hover);
   }
 
-  // 道具开/关 chip（与难度同款样式，视觉统一）
+  // 道具类型 chip（多选：亮=启用该类道具，全灭=整局无道具）
   ctx.textAlign = "right";
   ctx.fillStyle = THEME.textDim;
   ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
   ctx.fillText("道具", powupChips[0].x - 14, powupChips[0].y + POW_CHIP_H / 2);
   ctx.textAlign = "center";
   for (const c of powupChips) {
-    const selected = c.on === view.powerupsOn;
+    const selected = view.enabledPowerups.has(c.key);
     const hover = hitRect(mx, my, c);
     renderChip(ctx, c, c.label, selected, hover);
   }
@@ -533,7 +535,7 @@ function renderHelpOverlay(ctx, cx) {
   line("每回合自动换地图，回合结束后倒计时自动重开");
   ly += 6;
 
-  section("道具（可在菜单开关）");
+  section("道具（菜单可逐类开关）");
   line("护盾：挡下一发致命攻击即碎，或 5 秒后自动消失（先到先算）");
   line("散射：连续 3 次扇形开火（一炮 3 发）");
   line("激光：接下来 2 发开火变瞬时射线，沿墙反弹、命中即杀；炮口虚线预示弹道");
