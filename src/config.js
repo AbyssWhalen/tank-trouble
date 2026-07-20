@@ -188,15 +188,16 @@ export const VIEWPORT_PADDING = {
 // 道具系统（菜单可开关）。道具在地图随机刷新，坦克碾过即捡取。
 // 种类：scatter 散射弹（一炮变扇形多发，给若干次开火机会）、
 //       shield 护盾（挡一次致命伤害，或限时自动消失，先到先算）、
-//       pierce 穿墙弹（接下来几发子弹可穿透一堵内墙，穿后恢复正常反弹）。
-// scatter/pierce（以及后续 mine）同属「武器改装槽」互斥：同类拾取叠次数、
+//       pierce 穿墙弹（接下来几发子弹可穿透一堵内墙，穿后恢复正常反弹）、
+//       mine 地雷（接下来几次开火改为在车尾布雷，布防后近敌即炸，主人也会踩）。
+// scatter/pierce/mine 同属「武器改装槽」互斥：同类拾取叠次数、
 // 异类拾取清旧换新；shield 独立并存。
 // 效果全作用在 tank 状态上，控制指令 {turn,move,fire} 不变 → AI 自动受益、无需特判。
 export const POWERUP = {
   spawnInterval: [6, 10], // 距上次刷新多久再刷（秒，随机区间）
   maxOnField: 2,          // 场上同时最多几个道具
   radius: 16,             // 拾取圈半径（≈坦克半径，碾过即吃）
-  types: ["scatter", "shield", "pierce"], // 可刷新的种类（菜单关掉则整局不刷）
+  types: ["scatter", "shield", "pierce", "mine"], // 可刷新的种类（菜单关掉则整局不刷）
 
   scatter: {
     shots: 3,             // 捡一次给几次「扇形开火」机会
@@ -208,6 +209,14 @@ export const POWERUP = {
   },
   pierce: {
     shots: 2,             // 捡一次给几发穿墙弹（每发可穿 1 堵内墙）
+  },
+  mine: {
+    charges: 2,           // 捡一次给几次布雷机会（开火键消耗）
+    armDelay: 1.0,        // 布防延迟（秒）：落地后过这么久才进入警戒（给主人逃逸时间，
+                          //   坦克 120px/s × 1s = 120px，足够离开 40px 触发圈）
+    triggerRadius: 40,    // 警戒后任何坦克圆心距小于此即引爆（含主人，雷不认人）
+    blastRadius: 60,      // 爆炸波及半径（圆心距），圈内坦克有盾消盾、无盾即死
+    discRadius: 9,        // 雷盘视觉/落点修正半径（像素）
   },
 };
 
@@ -253,4 +262,7 @@ export const THEME = {
   powRing: "#2b2b33",      // 道具圆底描边
   shieldRing: "#3ad4e8",   // 坦克护盾光环色（半透明在 render 里加）
   bulletPierce: "#5b2fd6", // 穿墙弹弹体色（深紫，浅场地可读；穿墙后变回黑点）
+  powMineBg: "#5d6d7e",    // 地雷道具底色（灰蓝，低调中带危险感）
+  mineBody: "#3a3a4a",     // 落地雷盘主体色（与履带同色系的深灰）
+  mineBlink: "#e63946",    // 雷警戒指示灯（红，sin 闪烁）
 };

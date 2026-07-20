@@ -221,6 +221,64 @@ export class MuzzleFlash {
 }
 
 // ============================================================
+// MineBlast — 地雷爆炸（~0.5s）
+// 深灰冲击环快速扩张 + 内圈警戒红色残光 + 中心烟斑淡出。
+// 波及判定在 main（引爆瞬间一次性结算），这里只管演出。
+// ============================================================
+export class MineBlast {
+  // x, y: 爆炸中心（雷的位置）
+  constructor(x, y) {
+    this.x = x;
+    this.y = y;
+    this.age = 0;
+    this.duration = 0.5;
+  }
+
+  get done() {
+    return this.age >= this.duration;
+  }
+
+  update(dt) {
+    this.age += dt;
+  }
+
+  render(ctx) {
+    if (this.done) return;
+    const p = this.age / this.duration;
+    const alpha = 1 - p;
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+
+    // 外圈冲击环：扩到波及半径略外，宣示杀伤范围
+    ctx.globalAlpha = alpha * 0.9;
+    ctx.strokeStyle = "#2f2f33";
+    ctx.lineWidth = 4 * (1 - p * 0.6);
+    ctx.beginPath();
+    ctx.arc(0, 0, 12 + p * 58, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 内圈红色残光（与警戒灯同色，视觉连贯）
+    ctx.globalAlpha = alpha * 0.6;
+    ctx.strokeStyle = THEME.mineBlink;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, 6 + p * 40, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 中心烟斑：小幅膨胀淡出
+    ctx.globalAlpha = alpha * 0.7;
+    ctx.fillStyle = "#2f2f33";
+    ctx.beginPath();
+    ctx.arc(0, 0, 8 + p * 14, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ============================================================
 // PickupFlash — 拾取道具时的一圈快速扩散彩环（~0.3s）
 // 轻量提示「这里捡到了东西」，颜色按道具类型取（散射橙 / 护盾青）。
 // ============================================================
@@ -233,6 +291,7 @@ export class PickupFlash {
       scatter: THEME.powScatterBg,
       shield: THEME.powShieldBg,
       pierce: THEME.powPierceBg,
+      mine: THEME.powMineBg,
     };
     this.color = colors[type] || THEME.powScatterBg;
     this.age = 0;

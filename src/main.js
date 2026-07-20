@@ -24,10 +24,11 @@ import { generateMaze } from "./maze.js";
 import { circleVsCircle, separateCircles, resolveCircleWalls } from "./collision.js";
 import { fitArena } from "./layout.js";
 import {
-  TankExplosion, PickupFlash, ShieldBreak, MuzzleFlash,
+  TankExplosion, PickupFlash, ShieldBreak, MuzzleFlash, MineBlast,
   addShake, updateShake, shakeOffset,
 } from "./effects.js";
 import { PowerupSpawner } from "./powerup.js";
+import { Mine } from "./mine.js";
 import {
   isJustPressed, endFrame,
   bindMouse, getMousePos, isClicked, getAnyJustPressed,
@@ -80,6 +81,7 @@ let players = [];
 let bullets = [];
 let effects = [];              // 进行中的视觉特效（爆炸等），done 后移除
 let powerups = [];             // 场上待拾取的道具
+let mines = [];                // 场上已布的地雷（tryFire 分流入列，引爆后移除）
 let spawner = null;            // 道具刷新器（每回合按开关重建）
 let offsetX = 0, offsetY = 0;  // 竞技场缩放后左上角偏移（fitArena 算出，含居中）
 let arenaScale = 1;            // 竞技场自适应缩放比，∈(0,1]；大图超画面时 <1
@@ -144,6 +146,7 @@ function setupRound(mode) {
   bullets = [];
   effects = [];
   powerups = [];
+  mines = [];
   // 道具刷新器：开关关闭则传空种类，整局永不刷（spawner 内部 types 为空直接 return）
   spawner = new PowerupSpawner(powerupsOn ? POWERUP.types : []);
   winner = null;
@@ -297,7 +300,7 @@ function updatePlaying(dt) {
 
   // 1) 收集本帧所有玩家的控制指令（人读键盘 / AI 决策），与执行分离——
   //    保持"先全员移动、再全员开火"的原有顺序，也让 AI 看到的是同一帧的世界
-  const world = { maze, players, bullets, powerups };
+  const world = { maze, players, bullets, powerups, mines };
   const controls = players.map((p) => p.getControls(dt, world));
 
   // 2) 每辆坦克按指令移动转向 + 冷却
@@ -341,16 +344,47 @@ function updatePlaying(dt) {
   }
   powerups = powerups.filter((pw) => !pw.taken);
 
+  // 2.8) 地雷：布防计时推进 → 警戒雷近敌引爆 → 波及圈一次性结算。
+  //      雷不认人：主人踩上同样炸（armDelay 是唯一的逃逸窗口）。
+  //      波及内有盾消盾（与子弹挡一发同语义），无盾即死；可双杀 → 同归于尽。
+  for (const m of mines) m.update(dt);
+  for (const m of mines) {
+    if (m.exploded || !m.armed) continue;
+    const tripped = players.some(
+      (p) => p.alive && Math.hypot(p.tank.x - m.x, p.tank.y - m.y) < POWERUP.mine.triggerRadius
+    );
+    if (!tripped) continue;
+    m.exploded = true;
+    effects.push(new MineBlast(m.x, m.y));
+    addShake(6, 0.35);
+    for (const p of players) {
+      if (!p.alive) continue;
+      if (Math.hypot(p.tank.x - m.x, p.tank.y - m.y) >= POWERUP.mine.blastRadius) continue;
+      if (p.tank.shield) {
+        p.tank.shield = false;
+        p.tank.shieldTimer = 0;
+        effects.push(new ShieldBreak(p.tank.x, p.tank.y, THEME.shieldRing));
+      } else {
+        p.tank.alive = false;
+        effects.push(new TankExplosion(p.tank.x, p.tank.y, p.color));
+      }
+    }
+  }
+  mines = mines.filter((m) => !m.exploded);
+
   // 3) 开炮：收集新子弹（传 bullets 统计己方在场数实现 maxAlive 限流；
   //    传 walls 做贴墙出膛修正，防炮口越墙穿墙）。
-  //    tryFire 返回子弹数组（普通单发 [b]、散射多发、不开火 []），展开 push。
-  //    有弹出膛就在首发出膛点放炮口火光（散射多发同源，一次火光够了）。
+  //    tryFire 返回数组可能是子弹（单发/散射多发）或地雷（持雷时开火=布雷），
+  //    按类型分流；只有真开炮（产出子弹）才放炮口火光，布雷没有炮口一说。
   for (let i = 0; i < players.length; i++) {
     const news = players[i].tank.tryFire(bullets, controls[i].fire, maze.walls);
-    if (news.length > 0) {
+    if (news.length > 0 && !(news[0] instanceof Mine)) {
       effects.push(new MuzzleFlash(news[0].x, news[0].y, players[i].tank.angle));
     }
-    for (const b of news) bullets.push(b);
+    for (const e of news) {
+      if (e instanceof Mine) mines.push(e);
+      else bullets.push(e);
+    }
   }
 
   // 4) 子弹更新（移动 + 反弹）
@@ -506,6 +540,8 @@ function renderArena() {
 
   // 道具在地上（墙之上、子弹/坦克之下，坦克碾过去盖住它）
   for (const pw of powerups) pw.render(ctx);
+  // 地雷贴地（道具之上、子弹之下；坦克开过顶时盖住雷，贴近"碾在脚下"）
+  for (const m of mines) m.render(ctx);
   // 子弹在坦克下层
   for (const b of bullets) b.render(ctx);
   for (const p of players) p.tank.render(ctx);

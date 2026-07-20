@@ -8,6 +8,7 @@
 import { TANK, BULLET, POWERUP, THEME } from "./config.js";
 import { resolveCircleWalls, segmentVsSegmentParam } from "./collision.js";
 import { Bullet } from "./bullet.js";
+import { Mine } from "./mine.js";
 
 export class Tank {
   // x, y: 车体中心世界坐标（像素）
@@ -22,10 +23,11 @@ export class Tank {
     this.cooldown = 0;
 
     // —— 道具状态（捡到道具时由 applyPowerup 设置；无道具时全为初值）——
-    // scatter/pierce 同属「武器改装槽」互斥（异类拾取清旧换新，同类叠加次数），
+    // scatter/pierce/mine 同属「武器改装槽」互斥（异类拾取清旧换新，同类叠加），
     // shield 独立并存——见 applyPowerup。
     this.scatterShots = 0;   // 剩余「扇形开火」次数，>0 时 tryFire 打扇形并递减
     this.pierceShots = 0;    // 剩余「穿墙弹」发数，>0 时单发子弹带穿墙 1 次的能力
+    this.mineCharges = 0;    // 剩余布雷次数，>0 时开火键改为在车尾放雷
     this.shield = false;     // 是否持有护盾（挡一次致命伤害）
     this.shieldTimer = 0;    // 护盾剩余时间（秒），到点自动消失防一直龟
   }
@@ -84,8 +86,9 @@ export class Tank {
 
     const scattering = this.scatterShots > 0;
 
-    // 同屏己方存活子弹数达上限则不发射（散射绕开：见上方注释）
-    if (!scattering && bullets) {
+    // 同屏己方存活子弹数达上限则不发射（散射绕开：见上方注释；
+    // 布雷也绕开——放雷不产生子弹，不该被自己在场的弹药卡住）
+    if (!scattering && this.mineCharges === 0 && bullets) {
       let mine = 0;
       for (const b of bullets) {
         if (b.owner === this && !b.dead) mine++;
@@ -105,6 +108,21 @@ export class Tank {
         out.push(this.spawnBullet(this.angle + (i - mid) * spreadAngle, walls));
       }
       return out;
+    }
+
+    // 地雷：开火键改为在车尾放雷（替代该次射击，不产生子弹、不占 maxAlive）。
+    // 落点沿车尾方向探出，贴墙时 resolveCircleWalls 修回可用位置。
+    if (this.mineCharges > 0) {
+      this.mineCharges--;
+      const backDist = TANK.radius + POWERUP.mine.discRadius + 4;
+      let mx = this.x - Math.cos(this.angle) * backDist;
+      let my = this.y - Math.sin(this.angle) * backDist;
+      if (walls && walls.length) {
+        const fixed = resolveCircleWalls(mx, my, POWERUP.mine.discRadius, walls);
+        mx = fixed.x;
+        my = fixed.y;
+      }
+      return [new Mine(mx, my, this)];
     }
 
     // 穿墙弹：普通单发弹道（受 maxAlive 限流，上面已查过），只是弹上带
@@ -148,16 +166,22 @@ export class Tank {
   }
 
   // 拾取道具：按类型设置对应状态。
-  // 武器改装槽（scatter/pierce）互斥：拾取异类先清空旧存货再赋新，
+  // 武器改装槽（scatter/pierce/mine）互斥：拾取异类先清空旧存货再赋新，
   // 同类拾取叠加次数；shield 独立并存（刷新一层 + 重置计时）。
   // 互斥让 tryFire 的分支优先级永远无歧义，玩家/AI 心智模型也简单。
   applyPowerup(type) {
     if (type === "scatter") {
       this.pierceShots = 0;
+      this.mineCharges = 0;
       this.scatterShots += POWERUP.scatter.shots;
     } else if (type === "pierce") {
       this.scatterShots = 0;
+      this.mineCharges = 0;
       this.pierceShots += POWERUP.pierce.shots;
+    } else if (type === "mine") {
+      this.scatterShots = 0;
+      this.pierceShots = 0;
+      this.mineCharges += POWERUP.mine.charges;
     } else if (type === "shield") {
       this.shield = true;
       this.shieldTimer = POWERUP.shield.duration;

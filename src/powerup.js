@@ -22,6 +22,7 @@ const TYPE_BG = {
   scatter: THEME.powScatterBg,
   shield: THEME.powShieldBg,
   pierce: THEME.powPierceBg,
+  mine: THEME.powMineBg,
 };
 
 export class Powerup {
@@ -65,6 +66,8 @@ export class Powerup {
       drawScatterIcon(ctx, r);
     } else if (this.type === "pierce") {
       drawPierceIcon(ctx, r);
+    } else if (this.type === "mine") {
+      drawMineIcon(ctx, r);
     } else {
       drawShieldIcon(ctx, r);
     }
@@ -109,6 +112,37 @@ function drawShieldIcon(ctx, r) {
   ctx.quadraticCurveTo(-w, bot, -w, mid); // 左下收向尖底
   ctx.closePath();
   ctx.stroke();
+}
+
+// 地雷图标：半圆雷体扣在地平线上 + 顶部三根触刺 + 中心引信点
+function drawMineIcon(ctx, r) {
+  const w = r * 0.55;   // 雷体半宽
+  const base = r * 0.35; // 地平线高度（图标重心略下移）
+
+  // 地平线
+  ctx.beginPath();
+  ctx.moveTo(-r * 0.75, base);
+  ctx.lineTo(r * 0.75, base);
+  ctx.stroke();
+
+  // 半圆雷体（扣在地平线上）
+  ctx.beginPath();
+  ctx.arc(0, base, w, Math.PI, 0);
+  ctx.closePath();
+  ctx.stroke();
+
+  // 顶部三根触刺（从雷体表面沿径向朝外，-135°/-90°/-45°）
+  for (const a of [-Math.PI * 0.75, -Math.PI * 0.5, -Math.PI * 0.25]) {
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * w, base + Math.sin(a) * w);
+    ctx.lineTo(Math.cos(a) * (w + r * 0.3), base + Math.sin(a) * (w + r * 0.3));
+    ctx.stroke();
+  }
+
+  // 中心引信点
+  ctx.beginPath();
+  ctx.arc(0, base - w * 0.45, 1.8, 0, Math.PI * 2);
+  ctx.fill();
 }
 
 // 穿墙图标：中间一道竖墙（两段留缺口），一支箭从左穿缺口而过（表"穿透"）

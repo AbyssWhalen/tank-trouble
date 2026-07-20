@@ -21,8 +21,8 @@
 // 不做的：弹道预判射击、跳弹瞄准（难度升级留给后续阶段）。
 // ============================================================
 
-import { AI, AI_DIFFICULTY, CELL_SIZE, TANK, BULLET } from "./config.js";
-import { segmentVsSegment } from "./collision.js";
+import { AI, AI_DIFFICULTY, CELL_SIZE, TANK, BULLET, POWERUP } from "./config.js";
+import { segmentVsSegment, closestPointOnSegment } from "./collision.js";
 import { DIRS } from "./maze.js";
 
 // [min, max] 区间取随机数（AI 开火节奏抖动用）
@@ -74,6 +74,16 @@ function countInnerWallsHit(x1, y1, x2, y2, walls) {
   return n;
 }
 
+// 直线路径是否擦过任何危险圈（hazard = {x, y, r}，目前是地雷警戒圈）。
+// 擦圈就别走这条直线——移动层的避雷检查（躲弹罚分 / 直追改道共用）。
+function lineNearHazard(x1, y1, x2, y2, hazards) {
+  for (const h of hazards) {
+    const cp = closestPointOnSegment(h.x, h.y, x1, y1, x2, y2);
+    if (Math.hypot(h.x - cp.x, h.y - cp.y) < h.r) return true;
+  }
+  return false;
+}
+
 // 朝指定航向操舵：取最短旋转对齐；航向更靠车尾时倒车贴合（车尾当车头），
 // 省掉慢吞吞的 180° 转身——躲弹时这省出的就是命。
 function steerToHeading(self, heading) {
@@ -90,9 +100,10 @@ function steerToHeading(self, heading) {
 // 选闪避航向：8 个等分候选航向逐一打"安全分"——按该航向以坦克速度开车，
 // 未来 horizon 秒内离场上任何子弹的最近距离（相对运动闭式解，全弹幕一起算，
 // 不是只躲最急那颗）。朝墙的航向重罚（朝墙里闪等于站桩挨打），取最高分。
+// hazards（可选）：地雷等静态危险圈，探测线扫过同样重罚——躲子弹别躲进雷里。
 // 这就是"在一堆子弹里找正确路线"：横穿、斜退、借位都可能是最优解。
 // 导出供冒烟测试直接验证选路正确性。
-export function pickDodgeHeading(self, bullets, walls, horizon) {
+export function pickDodgeHeading(self, bullets, walls, horizon, hazards = []) {
   let bestHeading = 0;
   let bestScore = -Infinity;
 
@@ -116,13 +127,16 @@ export function pickDodgeHeading(self, bullets, walls, horizon) {
       score = Math.min(score, Math.hypot(rx + wx * t, ry + wy * t));
     }
 
+    // 探测线终点（朝墙罚 / 扫雷罚共用）
+    const tx = self.x + Math.cos(heading) * AI.dodgeClearance;
+    const ty = self.y + Math.sin(heading) * AI.dodgeClearance;
+
     // 朝墙航向重罚：罚值足够大，只有八方皆堵才会选到朝墙的（那就蹭墙滑）
-    if (segmentHitsWalls(
-      self.x, self.y,
-      self.x + Math.cos(heading) * AI.dodgeClearance,
-      self.y + Math.sin(heading) * AI.dodgeClearance,
-      walls
-    )) {
+    if (segmentHitsWalls(self.x, self.y, tx, ty, walls)) {
+      score -= AI.dodgeWallPenalty;
+    }
+    // 扫过雷圈同罚：闪进雷区比挨子弹还亏
+    if (hazards.length && lineNearHazard(self.x, self.y, tx, ty, hazards)) {
       score -= AI.dodgeWallPenalty;
     }
 
@@ -136,7 +150,9 @@ export function pickDodgeHeading(self, bullets, walls, horizon) {
 
 // BFS 网格最短路：返回从 from 的下一格到 to 的格子序列（不含 from）。
 // 同格或不可达返回 []。迷宫生成时已保证全连通，不可达只是兜底。
-function findPath(maze, from, to) {
+// blocked（可选）：禁行格 Set（"c,r" 键，目前是有雷的格）——绕开走；
+// 目标格被禁会判不可达，上层拿到 [] 走直怼兜底（有直线避雷检查兜着）。
+function findPath(maze, from, to, blocked) {
   if (from.c === to.c && from.r === to.r) return [];
 
   const { cols, rows, cells } = maze;
@@ -153,6 +169,7 @@ function findPath(maze, from, to) {
       if (nc < 0 || nc >= cols || nr < 0 || nr >= rows) continue;
       if (prev[nr][nc]) continue;          // 已访问
       if (cells[r][c][d.wall]) continue;   // 这面有墙，过不去
+      if (blocked && blocked.has(`${nc},${nr}`)) continue; // 格里有雷，绕开
       prev[nr][nc] = { c, r };
       queue.push({ c: nc, r: nr });
     }
@@ -239,6 +256,7 @@ export class AiController {
     const enemyShieldExpiring = enemy.shieldTimer < 1.5; // 护盾快到期（<1.5s 闪烁）
     const enemyHasScatter = enemy.scatterShots > 0;   // 敌人有散射弹（火力密集）
     const enemyHasPierce = enemy.pierceShots > 0;     // 敌人有穿墙弹（墙不再是掩体）
+    const enemyHasMine = enemy.mineCharges > 0;       // 敌人持雷（近身可能被丢雷拦路）
 
     const selfHasShield = self.shield;                // 自己有护盾
     const selfShieldExpiring = self.shieldTimer < 1.5; // 自己护盾快到期
@@ -247,11 +265,20 @@ export class AiController {
     //   自己有护盾（且未快到期）→ 狂暴模式：直接冲锋、不躲弹、放开火力、不捡道具（时间宝贵）
     //   敌人有护盾（且未快到期）→ 避战模式：不贴脸反打、优先捡道具/游走——
     //     开火不禁（护盾挡一发即碎，远距点破它的盾是赚的），只是不上去换命
-    //   敌人有散射/穿墙弹 → 防守模式：加强躲避、减少激进追击
-    //     （散射=火力密集；穿墙=隔墙也可能挨打，掩体不再可靠）
+    //   敌人有散射/穿墙弹/地雷 → 防守模式：加强躲避、减少激进追击
+    //     （散射=火力密集；穿墙=掩体不可靠；持雷=近身纠缠会被丢雷）
     const berserkMode = selfHasShield && !selfShieldExpiring;  // 狂暴：利用无敌冲锋
     const avoidMode = enemyHasShield && !enemyShieldExpiring; // 避战：等护盾消失
-    const defensiveMode = enemyHasScatter || enemyHasPierce;  // 防守：应对强化火力
+    const defensiveMode = enemyHasScatter || enemyHasPierce || enemyHasMine; // 防守：应对强化火力
+
+    // —— 场上地雷 → 移动层障碍（躲弹罚分 / BFS 绕格 / 直追改道三处共用）——
+    // 布防期的雷也一并避（马上就警戒了，没必要精确到帧）；雷不认人，
+    // 自己丢的同样在列——丢完雷靠这套逻辑自动绕开，不会回头踩自己的雷。
+    const mineClear = POWERUP.mine.triggerRadius + TANK.radius * 0.5;
+    const mineHazards = (world.mines || []).map((m) => ({ x: m.x, y: m.y, r: mineClear }));
+    const mineBlocked = mineHazards.length
+      ? new Set(mineHazards.map((h) => `${Math.floor(h.x / CELL_SIZE)},${Math.floor(h.y / CELL_SIZE)}`))
+      : null;
 
     // 开火冷却流逝：近战圈/狂暴模式按倍速燃烧（快速连发）
     // 避战模式不加速（不急着开火）
@@ -337,7 +364,7 @@ export class AiController {
       : null;
     if (threat && this.dodgeTimer <= 0) {
       this.dodgeHeading = pickDodgeHeading(
-        self, world.bullets, world.maze.walls, this.cfg.dodgeHorizon
+        self, world.bullets, world.maze.walls, this.cfg.dodgeHorizon, mineHazards
       );
       this.dodgeTimer = AI.dodgeCommit;
     }
@@ -403,6 +430,14 @@ export class AiController {
           : los;
       }
 
+      // 直追前的避雷检查：直线路径擦过任何雷的警戒圈 → 放弃直追改走 BFS
+      // 绕格（BFS 的 blocked 已把雷格排除）。躲弹机动不受此限（保命优先，
+      // pickDodgeHeading 自己会对扫雷航向罚分）。
+      if (goalLos && mineHazards.length &&
+          lineNearHazard(self.x, self.y, goal.x, goal.y, mineHazards)) {
+        goalLos = false;
+      }
+
       // 近战不需要特殊机动：必中角近大远小，贴脸时开火窗口极宽，
       // 边追边连续还手就是最强进攻；撞上对方有坦克碰撞顶着，无碍
       let target;
@@ -424,7 +459,7 @@ export class AiController {
           || this.pathGoalCell.c !== goalCell.c || this.pathGoalCell.r !== goalCell.r;
         if (this.replanTimer <= 0 || this.path.length === 0 || goalChanged) {
           this.replanTimer = this.cfg.replanInterval;
-          this.path = findPath(world.maze, cellOf(self, world.maze), goalCell);
+          this.path = findPath(world.maze, cellOf(self, world.maze), goalCell, mineBlocked);
           this.pathGoalCell = goalCell;
         }
         // 走到路点格中心附近就弹出，奔向下一个（while：一帧可能跨过多个）
@@ -470,11 +505,22 @@ export class AiController {
     //   ③ 质量门：开火窗口 = 几何必中角 × 难度 aimSkill，全部对拦截点评估。
     //      必中角随距离近大远小；瞄的是预判落点，所以每发都是"算出来会中"
     //   特殊情况：
+    //     - 持雷（武器槽被地雷占用）：开火键=布雷，走独立的布雷时机决策
     //     - 狂暴模式（自己有护盾）：放宽窗口 1.5 倍，激进开火
     //     - 避战模式（敌人有护盾）：照常开火——盾挡一发即碎，先点破它的盾
     //     - 防守模式（敌人有散射）：缩小窗口 40%，更谨慎
     let fire = false;
-    if (los && gunReady) {
+    if (self.mineCharges > 0) {
+      // 持雷时开火键=布雷（硬语义）：敌人近身（2 格内）就在车尾丢雷——
+      // 近战纠缠中丢下的雷对双方都是威胁，但自己有上面的避雷移动逻辑
+      // 会绕开，人类对手不一定记得。fireTimer 节奏门防两颗一口气全丢；
+      // 不走瞄准质量门（布雷不是射击）、不占弹药预算（雷不进 bullets）。
+      // 丢完存货自动回归炮弹逻辑。
+      if (this.fireTimer <= 0 && enemyDist < CELL_SIZE * 2) {
+        fire = true;
+        this.fireTimer = randRange(this.cfg.fireCooldown);
+      }
+    } else if (los && gunReady) {
       const hitTol = Math.atan2((TANK.radius + BULLET.radius) * AI.hitSlack, aimDist);
       let skillMod = this.cfg.aimSkill;
       if (berserkMode) skillMod *= 1.5;         // 狂暴：放宽窗口，多打
@@ -555,10 +601,11 @@ export class AiController {
     for (const p of powerups) {
       if (p.taken) continue;
 
-      // ① 有用性：盾在身上不重复捡；散射/穿墙有库存就先用掉再说
+      // ① 有用性：盾在身上不重复捡；散射/穿墙/地雷有库存就先用掉再说
       if (p.type === "shield" && self.shield) continue;
       if (p.type === "scatter" && self.scatterShots > 0) continue;
       if (p.type === "pierce" && self.pierceShots > 0) continue;
+      if (p.type === "mine" && self.mineCharges > 0) continue;
 
       const d = Math.hypot(p.x - self.x, p.y - self.y);
       if (d > range) continue; // ② 超出感知范围
