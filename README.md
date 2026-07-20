@@ -11,16 +11,24 @@ Local multiplayer tank combat game with procedural maze generation, bullet ricoc
 - 🎮 **双人对战 + 人机模式** | PvP & PvE modes
 - 🗺️ **随机迷宫生成** | Procedural maze generation with 3 size tiers
 - 💥 **子弹反弹物理** | Realistic bullet ricochet off walls
+- 🎁 **四种道具** | 4 power-ups: 散射 / 护盾 / 穿墙弹 / 地雷 | Scatter, Shield, Pierce & Mine
 - 🤖 **三档难度 AI** | AI with Easy/Normal/Hard difficulty levels
   - 智能躲弹 + 拦截预判射击 | Adaptive dodging + predictive aim
   - 近战反打决策 | Close-combat counter-attack logic
+  - 识别对手道具调整策略、绕雷寻路、隔墙狙击 | Reads opponent power-ups, avoids mines, snipes through walls
+- ⌨️ **键位自定义** | Rebindable controls (persisted locally)
+- 🖥️ **F11 全屏** | Fullscreen toggle with state memory
+- ✨ **手感特效** | Screen shake, muzzle flash, bullet trails & explosions
 - 🎯 **回合制计分** | Round-based scoring system
-- ✨ **爆炸特效** | Tank explosion effects
 - 📐 **自适应窗口** | Responsive viewport scaling
 
 ---
 
 ## 按键操作 | Controls
+
+默认键位如下，可在菜单左下角「键」按钮里自定义（重启后保留）。
+
+Default bindings below — rebind them via the "键" button at the bottom-left of the menu (persisted across restarts).
 
 ### 玩家 1 | Player 1
 - **移动** | Move: `W` `A` `S` `D`
@@ -31,8 +39,9 @@ Local multiplayer tank combat game with procedural maze generation, bullet ricoc
 - **开炮** | Fire: `Enter`
 
 ### 通用 | Common
-- **返回菜单** | Back to menu: `Esc`
-- **重开局** | Restart round: `R`
+- **暂停 / 返回菜单** | Pause / back to menu: `Esc`
+- **结算时立即开下一局** | Next round instantly (on round-over): `R`
+- **全屏** | Fullscreen: `F11`
 
 ---
 
@@ -80,15 +89,18 @@ npm run dist
 tank-trouble/
 ├── src/              # 游戏逻辑模块 | Game logic modules
 │   ├── main.js       # 主循环 + 状态机 | Main loop & state machine
+│   ├── ui.js         # 菜单/HUD/浮层 | Menus, HUD & overlays
 │   ├── ai.js         # AI 控制器 | AI controller
 │   ├── maze.js       # 迷宫生成 | Maze generation
 │   ├── tank.js       # 坦克物理 | Tank physics
 │   ├── bullet.js     # 子弹 + 反弹 | Bullet & ricochet
+│   ├── powerup.js    # 道具刷新 | Power-up spawning
+│   ├── mine.js       # 地雷 | Mines
+│   ├── settings.js   # 设置持久化 | Settings persistence
 │   ├── collision.js  # 碰撞检测 | Collision detection
 │   └── effects.js    # 视觉特效 | Visual effects
 ├── electron/         # Electron 主进程 | Electron main process
-├── index.html        # 渲染进程入口 | Renderer entry
-└── CLAUDE.md         # 开发文档 | Development docs
+└── index.html        # 渲染进程入口 | Renderer entry
 ```
 
 ---
@@ -111,8 +123,10 @@ Zero runtime dependencies, pure frontend implementation.
 - **阶段 5**：回合制计分 + 三档地图自适应缩放
 - **阶段 6**：人机模式 + AI（BFS 寻路、八向躲弹、拦截预判、近战反打）+ 爆炸特效
 - **阶段 7**：Windows 安装包打包
-
-详见 [CLAUDE.md](./CLAUDE.md)。
+- **阶段 8**：道具系统（散射 / 护盾）+ AI 识别对手道具 + 暂停功能
+- **阶段 9**：界面层重构 + 键位自定义（本地持久化）+ F11 全屏
+- **阶段 10**：护盾改「挡一发即碎」+ 屏幕震动 / 炮口火光 / 子弹拖尾
+- **阶段 11**：新道具穿墙弹 & 地雷 + AI 避雷 / 布雷 / 隔墙狙击
 
 ---
 

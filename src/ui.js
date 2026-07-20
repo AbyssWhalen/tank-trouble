@@ -404,7 +404,7 @@ export function renderRebindOverlay(ctx, view) {
   ctx.fillText("键位设置", cx, p.y + 40);
   ctx.fillStyle = THEME.textDim;
   ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.fillText("点击键位后按下新键 · Esc 取消捕获 · Escape / F11 不可绑定", cx, p.y + 72);
+  ctx.fillText("点击键位后按下新键 · Esc 取消捕获（Esc / F11 不可绑定）", cx, p.y + 72);
 
   // 两列表头（玩家色圆点 + 名称）
   for (let i = 0; i < 2; i++) {
@@ -537,7 +537,7 @@ function renderHelpOverlay(ctx, cx) {
   ly += 6;
 
   section("快捷键");
-  line("R 立即重开本局　·　Esc 返回菜单");
+  line("结算时 R 立即开下一局　·　Esc 暂停 / 返回菜单");
 
   // 底部关闭提示
   ctx.textAlign = "center";
