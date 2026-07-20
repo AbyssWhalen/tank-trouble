@@ -24,11 +24,11 @@ export class Tank {
     this.deployCooldown = 0;  // 道具键部署冷却（防一帧重复触发，与开火冷却无关）
 
     // —— 道具状态（捡到道具时由 applyPowerup 设置；无道具时全为初值）——
-    // scatter/pierce/mine 同属「武器改装槽」互斥（异类拾取清旧换新，同类叠加），
+    // scatter/laser/mine 同属「武器改装槽」互斥（异类拾取清旧换新，同类叠加），
     // shield 独立并存——见 applyPowerup。
     this.scatterShots = 0;   // 剩余「扇形开火」次数，>0 时 tryFire 打扇形并递减
-    this.pierceShots = 0;    // 剩余「穿墙弹」发数，>0 时单发子弹带穿墙 1 次的能力
-    this.mineCharges = 0;    // 剩余布雷次数，>0 时开火键改为在车尾放雷
+    this.laserShots = 0;     // 剩余激光发数，>0 时开火变瞬时射线（结算在 main）
+    this.mineCharges = 0;    // 剩余布雷次数，>0 时道具键在车尾放雷
     this.shield = false;     // 是否持有护盾（挡一次致命伤害）
     this.shieldTimer = 0;    // 护盾剩余时间（秒），到点自动消失防一直龟
   }
@@ -72,30 +72,31 @@ export class Tank {
   }
 
   // 尝试开炮：wantFire 为 true + 冷却就绪 + 同屏己方子弹未达上限时，
-  // 从炮口生成子弹。返回「子弹数组」——普通单发是 [bullet]，散射是多发，
-  // 不开火/被限流是 []。（原先返回单个 Bullet 或 null，改数组以支持散射弹；
-  // 调用方 main 用展开 push 接住，对单发零成本。）
+  // 从炮口开火。返回「开火结果」对象 { bullets, laser }：
+  //   普通单发 bullets=[b]、散射多发、不开火/被限流 bullets=[]；
+  //   持激光时 bullets=[]、laser={x,y,angle}（出膛点+方向的发射意图）——
+  //   激光是瞬时射线没有实体弹，路径投射与命中结算在 main（需要墙和全体坦克）。
   // wantFire 即控制指令的 fire 位（人类是边沿触发，AI 自带开火节奏）。
   // bullets: 全局子弹数组，用于统计自己还有几发在场（实现 maxAlive 限流）——
   // 这是原版"靠子弹上限而非冷却限流"的核心，去掉固定冷却后尤其关键。
-  //   散射开火绕开 maxAlive：扇形是一次性集中火力（一炮多发），受限流会瞬间触顶
-  //   只发出一两发，扇形就废了。普通单发仍严格受限流，原版手感不变。
+  //   散射/激光绕开 maxAlive：散射是一次性集中火力，受限流扇形就废了；
+  //   激光不产生实体弹，与在场子弹数无关。普通单发仍严格受限流。
   // walls: 墙线段数组，用于贴墙出膛修正（防穿墙）。
-  // 子弹的归属(owner)记为本坦克，便于"出膛宽限期"等判定。
   tryFire(bullets, wantFire, walls) {
-    if (!this.alive) return [];
-    if (this.cooldown > 0) return [];
-    if (!wantFire) return [];
+    const NO_FIRE = { bullets: [], laser: null };
+    if (!this.alive) return NO_FIRE;
+    if (this.cooldown > 0) return NO_FIRE;
+    if (!wantFire) return NO_FIRE;
 
     const scattering = this.scatterShots > 0;
 
-    // 同屏己方存活子弹数达上限则不发射（散射绕开：见上方注释）
-    if (!scattering && bullets) {
+    // 同屏己方存活子弹数达上限则不发射（散射/激光绕开：见上方注释）
+    if (!scattering && this.laserShots === 0 && bullets) {
       let mine = 0;
       for (const b of bullets) {
         if (b.owner === this && !b.dead) mine++;
       }
-      if (mine >= BULLET.maxAlive) return [];
+      if (mine >= BULLET.maxAlive) return NO_FIRE;
     }
 
     this.cooldown = BULLET.cooldown;
@@ -109,17 +110,16 @@ export class Tank {
       for (let i = 0; i < pellets; i++) {
         out.push(this.spawnBullet(this.angle + (i - mid) * spreadAngle, walls));
       }
-      return out;
+      return { bullets: out, laser: null };
     }
 
-    // 穿墙弹：普通单发弹道（受 maxAlive 限流，上面已查过），只是弹上带
-    // 「可穿透 1 堵内墙」的额度；打完存货自动恢复普通弹
-    if (this.pierceShots > 0) {
-      this.pierceShots--;
-      return [this.spawnBullet(this.angle, walls, 1)];
+    // 激光：消耗一发，返回发射意图；打完存货自动恢复普通弹
+    if (this.laserShots > 0) {
+      this.laserShots--;
+      return { bullets: [], laser: this.muzzlePoint() };
     }
 
-    return [this.spawnBullet(this.angle, walls)];
+    return { bullets: [this.spawnBullet(this.angle, walls)], laser: null };
   }
 
   // 部署道具（special 键，独立于开火）：持雷时在车尾放一颗雷。
@@ -147,10 +147,20 @@ export class Tank {
     return new Mine(mx, my, this);
   }
 
+  // 炮口出膛点（激光发射/预瞄虚线用；子弹的出膛另在 spawnBullet 里
+  // 按各自散射角独立算并做贴墙修正）。angle 一并给出方便直接作发射意图。
+  muzzlePoint() {
+    const d = TANK.bodyLength / 2 + TANK.barrelLength + BULLET.radius + 2;
+    return {
+      x: this.x + Math.cos(this.angle) * d,
+      y: this.y + Math.sin(this.angle) * d,
+      angle: this.angle,
+    };
+  }
+
   // 沿给定 heading 生成一发子弹，含贴墙出膛修正（防穿墙）。
   // 抽出来供单发 / 散射多发共用：每发各按自己的角度独立修正出膛点。
-  // pierceLeft: 该弹可穿透的内墙数（穿墙弹传 1，普通弹省略为 0）。
-  spawnBullet(heading, walls, pierceLeft = 0) {
+  spawnBullet(heading, walls) {
     // 炮口位置：从车体中心沿朝向伸出（炮管末端再多探出一点，避免子弹生成在车体内被自己挡）
     const muzzleDist = TANK.bodyLength / 2 + TANK.barrelLength + BULLET.radius + 2;
 
@@ -174,25 +184,25 @@ export class Tank {
     const by = this.y + Math.sin(heading) * spawnDist;
     const vx = Math.cos(heading) * BULLET.speed;
     const vy = Math.sin(heading) * BULLET.speed;
-    return new Bullet(bx, by, vx, vy, this, pierceLeft);
+    return new Bullet(bx, by, vx, vy, this);
   }
 
   // 拾取道具：按类型设置对应状态。
-  // 武器改装槽（scatter/pierce/mine）互斥：拾取异类先清空旧存货再赋新，
+  // 武器改装槽（scatter/laser/mine）互斥：拾取异类先清空旧存货再赋新，
   // 同类拾取叠加次数；shield 独立并存（刷新一层 + 重置计时）。
   // 互斥让 tryFire 的分支优先级永远无歧义，玩家/AI 心智模型也简单。
   applyPowerup(type) {
     if (type === "scatter") {
-      this.pierceShots = 0;
+      this.laserShots = 0;
       this.mineCharges = 0;
       this.scatterShots += POWERUP.scatter.shots;
-    } else if (type === "pierce") {
+    } else if (type === "laser") {
       this.scatterShots = 0;
       this.mineCharges = 0;
-      this.pierceShots += POWERUP.pierce.shots;
+      this.laserShots += POWERUP.laser.shots;
     } else if (type === "mine") {
       this.scatterShots = 0;
-      this.pierceShots = 0;
+      this.laserShots = 0;
       this.mineCharges += POWERUP.mine.charges;
     } else if (type === "shield") {
       this.shield = true;

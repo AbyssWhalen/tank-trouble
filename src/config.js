@@ -186,19 +186,20 @@ export const VIEWPORT_PADDING = {
   left: 18,
 };
 
-// 道具系统（菜单可开关）。道具在地图随机刷新，坦克碾过即捡取。
+// 道具系统（菜单可按类型开关）。道具在地图随机刷新，坦克碾过即捡取。
 // 种类：scatter 散射弹（一炮变扇形多发，给若干次开火机会）、
 //       shield 护盾（挡一次致命伤害，或限时自动消失，先到先算）、
-//       pierce 穿墙弹（接下来几发子弹可穿透一堵内墙，穿后恢复正常反弹）、
-//       mine 地雷（接下来几次开火改为在车尾布雷，布防后近敌即炸，主人也会踩）。
-// scatter/pierce/mine 同属「武器改装槽」互斥：同类拾取叠次数、
+//       laser 激光（接下来几发开火变瞬时射线：沿墙反弹、命中即杀，
+//         持有时炮口延伸预瞄虚线——威力大但意图外露，平衡设计）、
+//       mine 地雷（道具键在车尾布雷，布防后近敌即炸，主人也会踩）。
+// scatter/laser/mine 同属「武器改装槽」互斥：同类拾取叠次数、
 // 异类拾取清旧换新；shield 独立并存。
-// 效果全作用在 tank 状态上，控制指令 {turn,move,fire} 不变 → AI 自动受益、无需特判。
+// 效果全作用在 tank 状态上，控制指令 {turn,move,fire,special} 不变 → AI 自动受益。
 export const POWERUP = {
   spawnInterval: [6, 10], // 距上次刷新多久再刷（秒，随机区间）
   maxOnField: 2,          // 场上同时最多几个道具
   radius: 16,             // 拾取圈半径（≈坦克半径，碾过即吃）
-  types: ["scatter", "shield", "pierce", "mine"], // 可刷新的种类（菜单关掉则整局不刷）
+  types: ["scatter", "shield", "laser", "mine"], // 全部种类（实际启用集合由菜单选择）
 
   scatter: {
     shots: 3,             // 捡一次给几次「扇形开火」机会
@@ -208,11 +209,15 @@ export const POWERUP = {
   shield: {
     duration: 5,          // 护盾最长持续（秒），到点自动消失防一直龟
   },
-  pierce: {
-    shots: 2,             // 捡一次给几发穿墙弹（每发可穿 1 堵内墙）
+  laser: {
+    shots: 2,             // 捡一次给几发激光
+    maxBounces: 4,        // 射线最多反弹几次
+    maxLength: 960,       // 射线总长上限（像素，= CELL_SIZE×10，防无限折返）
+    previewLength: 240,   // 预瞄虚线总长（像素，= CELL_SIZE×2.5，只到首弹后一小段）
+    beamDuration: 0.25,   // 亮线特效淡出时长（秒）
   },
   mine: {
-    charges: 2,           // 捡一次给几次布雷机会（开火键消耗）
+    charges: 2,           // 捡一次给几次布雷机会（道具键消耗）
     armDelay: 1.0,        // 布防延迟（秒）：落地后过这么久才进入警戒（给主人逃逸时间，
                           //   坦克 120px/s × 1s = 120px，足够离开 40px 触发圈）
     triggerRadius: 40,    // 警戒后任何坦克圆心距小于此即引爆（含主人，雷不认人）
@@ -258,11 +263,12 @@ export const THEME = {
   // 道具（地上的拾取物 + 坦克身上的护盾环）
   powScatterBg: "#e9a200", // 散射弹底色（暖橙，地面上够跳）
   powShieldBg: "#2bb3c4",  // 护盾道具底色（青蓝）
-  powPierceBg: "#7c4dff",  // 穿墙弹底色（紫，与 P4 玩家色同源但本地版用不上 P4）
+  powLaserBg: "#d0353f",   // 激光道具底色（深红，危险感）
   powIcon: "#ffffff",      // 道具图标线条（白，压在底色上）
   powRing: "#2b2b33",      // 道具圆底描边
   shieldRing: "#3ad4e8",   // 坦克护盾光环色（半透明在 render 里加）
-  bulletPierce: "#5b2fd6", // 穿墙弹弹体色（深紫，浅场地可读；穿墙后变回黑点）
+  laserBeam: "#e63946",    // 激光亮线色（内芯，外圈光晕同色低透明）
+  laserPreview: "rgba(230,57,70,0.45)", // 预瞄虚线（半透明红）
   powMineBg: "#5d6d7e",    // 地雷道具底色（灰蓝，低调中带危险感）
   mineBody: "#3a3a4a",     // 落地雷盘主体色（与履带同色系的深灰）
   mineBlink: "#e63946",    // 雷警戒指示灯（红，sin 闪烁）

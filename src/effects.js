@@ -290,7 +290,7 @@ export class PickupFlash {
     const colors = {
       scatter: THEME.powScatterBg,
       shield: THEME.powShieldBg,
-      pierce: THEME.powPierceBg,
+      laser: THEME.powLaserBg,
       mine: THEME.powMineBg,
     };
     this.color = colors[type] || THEME.powScatterBg;

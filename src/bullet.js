@@ -11,8 +11,7 @@ import { reflect, circleVsSegment } from "./collision.js";
 export class Bullet {
   // x,y: 出膛位置；vx,vy: 速度向量（像素/秒，已含方向与大小）
   // owner: 发射它的坦克（用于自伤宽限期，避免刚出炮口就打死自己）
-  // pierceLeft: 可穿透的内墙数（穿墙弹为 1，普通弹 0）；穿透消耗完恢复普通反弹
-  constructor(x, y, vx, vy, owner, pierceLeft = 0) {
+  constructor(x, y, vx, vy, owner) {
     this.x = x;
     this.y = y;
     this.vx = vx;
@@ -23,7 +22,6 @@ export class Bullet {
     this.age = 0;        // 已存活秒数
     this.dead = false;   // true 时 main 会从数组移除
     this.trail = [];     // 最近几帧的位置（拖尾渲染用，反弹处自然拐弯）
-    this.pierceLeft = pierceLeft;
   }
 
   // dt: 距上一帧秒数；walls: 墙线段数组
@@ -52,18 +50,6 @@ export class Bullet {
           w.x1, w.y1, w.x2, w.y2
         );
         if (hit) {
-          // 穿墙弹：还有穿透额度且是内墙 → 不反射，把圆心推到墙另一侧继续直飞。
-          // 位移 = 未穿透侧剩余距离(radius-depth) + 另一侧探出 radius + 1px 余量，
-          // 保证下一帧不再与这堵墙相交（防同帧/次帧重复判定）。
-          // 边界墙(border)永远反弹——物理上杜绝子弹飞出场外。
-          // 角落同帧贴两堵墙：第一堵穿掉额度后，第二堵走正常反弹分支。
-          if (this.pierceLeft > 0 && !w.border) {
-            this.pierceLeft--;
-            const push = 2 * BULLET.radius - hit.depth + 1;
-            this.x -= hit.nx * push;
-            this.y -= hit.ny * push;
-            continue;
-          }
           // 1) 先推出墙面，避免嵌进墙里下一帧继续反射
           this.x += hit.nx * hit.depth;
           this.y += hit.ny * hit.depth;
@@ -96,10 +82,6 @@ export class Bullet {
   render(ctx) {
     if (this.dead) return;
 
-    // 穿墙弹未耗尽额度时显紫色（弹体+拖尾），穿墙后自动变回黑点——
-    // 视觉直接传达「特权已用掉」；普通弹保持原版黑点。
-    const bodyColor = this.pierceLeft > 0 ? THEME.bulletPierce : THEME.bullet;
-
     // 拖尾：几个渐隐渐小的灰点垫在弹体后面，浅色场地上似淡淡的烟迹。
     // 反弹瞬间历史点在墙角自然拐弯，跳弹轨迹一眼可读。
     for (let i = 0; i < this.trail.length; i++) {
@@ -108,16 +90,16 @@ export class Bullet {
       ctx.globalAlpha = 0.14 * f;
       ctx.beginPath();
       ctx.arc(t.x, t.y, BULLET.radius * (0.4 + 0.5 * f), 0, Math.PI * 2);
-      ctx.fillStyle = bodyColor;
+      ctx.fillStyle = THEME.bullet;
       ctx.fill();
     }
     ctx.globalAlpha = 1;
 
-    // 原版风格：朴素的实心小圆点，无描边、无发光（贴合截图）。
+    // 原版风格：朴素的实心黑色小圆点，无描边、无发光（贴合截图）。
     // 不区分归属——原版子弹本就是不分颜色的黑点，满屏跳弹谁的都一样致命。
     ctx.beginPath();
     ctx.arc(this.x, this.y, BULLET.radius, 0, Math.PI * 2);
-    ctx.fillStyle = bodyColor;
+    ctx.fillStyle = THEME.bullet;
     ctx.fill();
   }
 }

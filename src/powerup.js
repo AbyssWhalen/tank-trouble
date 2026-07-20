@@ -21,12 +21,12 @@ function randRange([min, max]) {
 const TYPE_BG = {
   scatter: THEME.powScatterBg,
   shield: THEME.powShieldBg,
-  pierce: THEME.powPierceBg,
+  laser: THEME.powLaserBg,
   mine: THEME.powMineBg,
 };
 
 export class Powerup {
-  // x, y: 世界坐标（格中心附近）；type: "scatter" | "shield" | "pierce"
+  // x, y: 世界坐标（格中心附近）；type: POWERUP.types 之一
   constructor(x, y, type) {
     this.x = x;
     this.y = y;
@@ -64,8 +64,8 @@ export class Powerup {
     ctx.lineJoin = "round";
     if (this.type === "scatter") {
       drawScatterIcon(ctx, r);
-    } else if (this.type === "pierce") {
-      drawPierceIcon(ctx, r);
+    } else if (this.type === "laser") {
+      drawLaserIcon(ctx, r);
     } else if (this.type === "mine") {
       drawMineIcon(ctx, r);
     } else {
@@ -145,31 +145,18 @@ function drawMineIcon(ctx, r) {
   ctx.fill();
 }
 
-// 穿墙图标：中间一道竖墙（两段留缺口），一支箭从左穿缺口而过（表"穿透"）
-function drawPierceIcon(ctx, r) {
-  const wallX = 0;
-  const half = r * 0.62;
-  const gap = r * 0.2;
-  // 竖墙上下两段，中间留缺口
+// 激光图标：一道折线射线（反弹轨迹意象）+ 末端光点
+function drawLaserIcon(ctx, r) {
+  const s = r * 0.62;
   ctx.beginPath();
-  ctx.moveTo(wallX, -half);
-  ctx.lineTo(wallX, -gap);
-  ctx.moveTo(wallX, gap);
-  ctx.lineTo(wallX, half);
+  ctx.moveTo(-s, s * 0.7);
+  ctx.lineTo(-s * 0.15, -s * 0.6);
+  ctx.lineTo(s * 0.35, s * 0.5);
+  ctx.lineTo(s * 0.95, -s * 0.45);
   ctx.stroke();
-  // 横穿的箭：杆 + 箭头
-  const ax0 = -r * 0.62, ax1 = r * 0.62;
   ctx.beginPath();
-  ctx.moveTo(ax0, 0);
-  ctx.lineTo(ax1, 0);
-  ctx.stroke();
-  const back = 4.5;
-  ctx.beginPath();
-  ctx.moveTo(ax1, 0);
-  ctx.lineTo(ax1 - back, -back * 0.8);
-  ctx.moveTo(ax1, 0);
-  ctx.lineTo(ax1 - back, back * 0.8);
-  ctx.stroke();
+  ctx.arc(s * 0.95, -s * 0.45, 2.2, 0, Math.PI * 2);
+  ctx.fill();
 }
 
 export class PowerupSpawner {

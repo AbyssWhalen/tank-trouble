@@ -21,12 +21,13 @@ import {
 } from "./config.js";
 import { Player } from "./player.js";
 import { generateMaze } from "./maze.js";
-import { circleVsCircle, separateCircles, resolveCircleWalls } from "./collision.js";
+import { circleVsCircle, separateCircles, resolveCircleWalls, closestPointOnSegment } from "./collision.js";
 import { fitArena } from "./layout.js";
 import {
   TankExplosion, PickupFlash, ShieldBreak, MuzzleFlash, MineBlast,
   addShake, updateShake, shakeOffset,
 } from "./effects.js";
+import { castLaserPath, LaserBeam, renderLaserPreview } from "./laser.js";
 import { PowerupSpawner } from "./powerup.js";
 import {
   isJustPressed, endFrame,
@@ -372,14 +373,16 @@ function updatePlaying(dt) {
   }
   mines = mines.filter((m) => !m.exploded);
 
-  // 3) 开炮 + 部署：开火键产子弹（单发/散射，maxAlive 限流 + 贴墙出膛修正），
-  //    道具键走 tryDeploy 部署地雷——射击与部署解耦，各有冷却互不影响。
+  // 3) 开炮 + 部署：开火键产子弹（单发/散射，maxAlive 限流 + 贴墙出膛修正）
+  //    或激光（瞬时射线，当帧结算）；道具键走 tryDeploy 部署地雷——
+  //    射击与部署解耦，各有冷却互不影响。
   for (let i = 0; i < players.length; i++) {
-    const news = players[i].tank.tryFire(bullets, controls[i].fire, maze.walls);
-    if (news.length > 0) {
-      effects.push(new MuzzleFlash(news[0].x, news[0].y, players[i].tank.angle));
+    const res = players[i].tank.tryFire(bullets, controls[i].fire, maze.walls);
+    if (res.bullets.length > 0) {
+      effects.push(new MuzzleFlash(res.bullets[0].x, res.bullets[0].y, players[i].tank.angle));
     }
-    for (const b of news) bullets.push(b);
+    for (const b of res.bullets) bullets.push(b);
+    if (res.laser) fireLaser(res.laser);
 
     const mine = players[i].tank.tryDeploy(controls[i].special, maze.walls);
     if (mine) mines.push(mine);
@@ -432,6 +435,55 @@ function updatePlaying(dt) {
     roundOverTimer = ROUND_RESTART_DELAY; // 启动自动重开倒计时
     state = STATE.ROUND_OVER;
   }
+}
+
+// 激光发射结算（瞬时 hitscan，当帧一次完成）：投射折线路径 → 沿路径找
+// 「最早」被扫到的坦克（逐段推进，段内按参数排序）→ 命中处理（有盾消盾
+// 挡住射线，无盾即死）→ 路径截断到命中点（视觉上射线止于目标/护盾）。
+// origin = tank.muzzlePoint()；首段起点在炮口外、朝前发射，几何上不会
+// 打中发射者自己；反弹段扫回来则可以自杀——与子弹跳弹手感一致。
+function fireLaser(origin) {
+  let pts = castLaserPath(origin.x, origin.y, origin.angle, maze.walls);
+
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+    const segLen = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+
+    // 段内最早命中：对每辆活坦克求「圆心在段上的最近点」，够近算扫中，
+    // 取沿段参数最小者（同段两车都在线上时，先扫到谁谁挨打）
+    let hit = null;
+    for (const p of players) {
+      if (!p.alive) continue;
+      const cp = closestPointOnSegment(p.tank.x, p.tank.y, a.x, a.y, b.x, b.y);
+      if (Math.hypot(p.tank.x - cp.x, p.tank.y - cp.y) > TANK.radius) continue;
+      const t = Math.hypot(cp.x - a.x, cp.y - a.y) / segLen;
+      if (!hit || t < hit.t) hit = { p, t, x: cp.x, y: cp.y };
+    }
+
+    if (hit) {
+      // 截断路径到命中点（后续段不再判定：射线被目标吸收）
+      pts = pts.slice(0, i + 1);
+      pts.push({ x: hit.x, y: hit.y });
+      const tank = hit.p.tank;
+      if (tank.shield) {
+        // 护盾挡激光：消盾 + 破盾特效，射线止于盾（与子弹挡盾语义一致）
+        tank.shield = false;
+        tank.shieldTimer = 0;
+        effects.push(new ShieldBreak(tank.x, tank.y, THEME.shieldRing));
+        addShake(3, 0.2);
+      } else {
+        tank.alive = false;
+        effects.push(new TankExplosion(tank.x, tank.y, hit.p.color));
+        addShake(5, 0.3);
+      }
+      break;
+    }
+  }
+
+  effects.push(new LaserBeam(pts));
+  effects.push(new MuzzleFlash(origin.x, origin.y, origin.angle));
+  addShake(4, 0.25);
 }
 
 function updatePaused() {
@@ -540,6 +592,10 @@ function renderArena() {
   for (const pw of powerups) pw.render(ctx);
   // 地雷贴地（道具之上、子弹之下；坦克开过顶时盖住雷，贴近"碾在脚下"）
   for (const m of mines) m.render(ctx);
+  // 激光预瞄虚线（贴地层）：持激光的活坦克炮口路径预览，随转向实时变化
+  for (const p of players) {
+    if (p.alive && p.tank.laserShots > 0) renderLaserPreview(ctx, p.tank, maze.walls);
+  }
   // 子弹在坦克下层
   for (const b of bullets) b.render(ctx);
   for (const p of players) p.tank.render(ctx);
