@@ -3,8 +3,8 @@
 // castLaserPath：纯几何——从起点沿方向投射，撞墙反射，直到反弹次数或
 //   总长度耗尽，返回折线顶点数组（首=起点，尾=终点）。冒烟测试直接断言。
 // LaserBeam：开火后的亮线特效（折线，beamDuration 内淡出），纯表现层。
-// renderLaserPreview：持激光时炮口延伸的预瞄虚线（短程路径预览，随转向
-//   实时变化）——激光威力大但持有时意图外露，这是它的平衡设计。
+// renderLaserPreview：持激光时炮口延伸的全程预瞄虚线（含反弹段，随转向
+//   实时变化）——激光威力大但持有时弹道全暴露，这是它的平衡设计。
 // 命中判定（逐段 vs 坦克圆、沿路径最早命中即截断）在 main——与子弹
 // 击中判定同层（需要跨全体坦克交叉），本模块只管几何与画线。
 // ============================================================
@@ -114,14 +114,13 @@ export class LaserBeam {
   }
 }
 
-// 预瞄虚线：持激光时从炮口画短程路径预览（首次反弹后再延伸一小段）。
-// 每帧随 tank.angle 实时重算；世界坐标绘制，跟竞技场一起缩放。
+// 预瞄虚线：持激光时从炮口画完整弹道预览（含全部反弹段，与实际发射用同一
+// 套参数投射——所见即所打）。每帧随 tank.angle 实时重算；世界坐标绘制。
+// 全程可见是激光的平衡设计：威力不削，但持有者的杀伤线全暴露，
+// 对手可以绕线走位——「暗杀」变「明枪」。
 export function renderLaserPreview(ctx, tank, walls) {
   const m = tank.muzzlePoint();
-  const pts = castLaserPath(m.x, m.y, m.angle, walls, {
-    maxBounces: 1,
-    maxLength: POWERUP.laser.previewLength,
-  });
+  const pts = castLaserPath(m.x, m.y, m.angle, walls);
   if (pts.length < 2) return;
 
   ctx.save();
