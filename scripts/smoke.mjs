@@ -12,8 +12,8 @@ import { Bullet } from "../src/bullet.js";
 import { Mine } from "../src/mine.js";
 import { castLaserPath } from "../src/laser.js";
 import { generateMaze } from "../src/maze.js";
-import { AiController } from "../src/ai.js";
-import { POWERUP, TANK, KEY_BINDINGS, BULLET } from "../src/config.js";
+import { AiController, findBounceShot } from "../src/ai.js";
+import { POWERUP, TANK, KEY_BINDINGS, BULLET, CELL_SIZE } from "../src/config.js";
 
 let pass = 0;
 let fail = 0;
@@ -174,6 +174,81 @@ section("子弹反弹回归");
     if (b.vx < 0) { bounced = true; break; }
   }
   check("普通弹撞墙反弹", bounced && b.x < 300 && b.bounces === 1);
+}
+
+// ============================================================
+section("跳弹吊射解算 (findBounceShot)");
+{
+  // 水平墙 y=0,自己 (-100,100) 目标 (100,100) 同侧:镜像法解出反弹点 (0,0),
+  // 开火角 -45°,总路程 2×√2×100
+  const wall = { x1: -200, y1: 0, x2: 200, y2: 0 };
+  const shot = findBounceShot(-100, 100, 100, 100, [wall]);
+  check("单墙反弹解存在", shot !== null);
+  check("反弹角 -45°", shot && near(shot.angle, -Math.PI / 4, 0.01), shot && `angle=${shot.angle.toFixed(3)}`);
+  check("总路程正确", shot && near(shot.dist, 200 * Math.SQRT2, 1), shot && `dist=${shot.dist.toFixed(1)}`);
+
+  // 入射路径被第二堵墙遮挡 → 无解
+  const blocker = { x1: -50, y1: -10, x2: -50, y2: 120 };
+  check("遮挡时无解", findBounceShot(-100, 100, 100, 100, [wall, blocker]) === null);
+
+  // 目标在墙另一侧(反弹路径=穿墙,物理不成立)→ 无解
+  check("异侧无解", findBounceShot(-100, 100, 100, -100, [wall]) === null);
+}
+
+// ============================================================
+section("AI 激光 hitscan 开火判定");
+{
+  // 空旷场地(无墙,有视线,不触发 BFS/躲弹),敌人在正东 300px
+  const mkWorld = (bot, enemy) => ({
+    maze: { cols: 5, rows: 4, walls: [], cells: null },
+    players: [enemy, bot],
+    bullets: [], powerups: [], mines: [],
+  });
+  const mkP = (tank) => ({ tank, get alive() { return this.tank.alive; } });
+
+  // 炮口正对敌人:持激光 → 首段扫中 → 必开火
+  {
+    const bot = mkP(new Tank(100, 100, 0, "#222"));
+    const enemy = mkP(new Tank(400, 100, Math.PI, "#111"));
+    const ai = new AiController(bot, "normal");
+    bot.tank.applyPowerup("laser");
+    ai.fireTimer = -1; // 冷却就绪
+    const c = ai.update(1 / 60, mkWorld(bot, enemy));
+    check("正对敌人扫中即开", c.fire === true);
+  }
+  // 炮口背对敌人:路径扫不中 → 绝不浪费
+  {
+    const bot = mkP(new Tank(100, 100, Math.PI, "#222"));
+    const enemy = mkP(new Tank(400, 100, Math.PI, "#111"));
+    const ai = new AiController(bot, "normal");
+    bot.tank.applyPowerup("laser");
+    ai.fireTimer = -1;
+    const c = ai.update(1 / 60, mkWorld(bot, enemy));
+    check("背对敌人不开火", c.fire === false);
+  }
+}
+
+// ============================================================
+section("AI 捡道具机会成本");
+{
+  const mkP = (tank) => ({ tank, get alive() { return this.tank.alive; } });
+  const world = (players, powerups) => ({
+    maze: { cols: 7, rows: 5, walls: [], cells: null },
+    players, powerups, bullets: [], mines: [],
+  });
+  const bot = mkP(new Tank(200, 200, 0, "#222"));
+  const enemy = mkP(new Tank(200 + CELL_SIZE * 1.6, 200, Math.PI, "#111")); // 敌人 1.6 格,有视线
+  const ai = new AiController(bot, "hard");
+
+  // 道具比敌人还远(2.5 格 > 敌距×0.8)→ 对峙中不值得转身去拿
+  const farPw = { x: 200 - CELL_SIZE * 2.5, y: 200, type: "shield", taken: false };
+  check("对峙中放弃更远的道具",
+    ai.pickPowerupTarget(bot.tank, [farPw], world([enemy, bot], [farPw]), false) === null);
+
+  // 道具明显更近(0.8 格 < 敌距×0.8)→ 顺手可拿
+  const nearPw = { x: 200 - CELL_SIZE * 0.8, y: 200, type: "shield", taken: false };
+  check("明显更近的道具仍然拿",
+    ai.pickPowerupTarget(bot.tank, [nearPw], world([enemy, bot], [nearPw]), false) === nearPw);
 }
 
 // ============================================================

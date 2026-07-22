@@ -163,10 +163,13 @@ export const AI = {
 //   powerupRange   道具感知半径（格）：只有这范围内、且对自己有用的道具才会去捡。
 //                  优先级低于躲弹/反打（不为道具送命或放跑人头），高于纯追敌。
 //                  简单档 0=完全不主动捡、普通 4=保守安全时捡、困难 7=激进主动抢
+//   bounceAim      跳弹吊射开关：无视线时用镜像法找一次反弹解，停车转炮隔墙
+//                  吊射（阵地射击）；持激光时同时解锁全路径反弹判定（反弹激光狙）。
+//                  原版高手核心技能，仅困难档启用——这是三档的质变分水岭
 export const AI_DIFFICULTY = {
-  easy:   { label: "简单", aimSkill: 2.0, fireCooldown: [1.0, 1.8],   replanInterval: 0.7,  dodgeHorizon: 0,    dodgeMargin: 0,  ammoBudget: 2, leadFactor: 0,   powerupRange: 0 },
-  normal: { label: "普通", aimSkill: 1.5, fireCooldown: [0.7, 1.4],   replanInterval: 0.55, dodgeHorizon: 0.35, dodgeMargin: 4,  ammoBudget: 2, leadFactor: 0.6, powerupRange: 4 },
-  hard:   { label: "困难", aimSkill: 0.9, fireCooldown: [0.25, 0.55], replanInterval: 0.25, dodgeHorizon: 0.9,  dodgeMargin: 14, ammoBudget: 3, leadFactor: 1.0, powerupRange: 7 },
+  easy:   { label: "简单", aimSkill: 2.0, fireCooldown: [1.0, 1.8],   replanInterval: 0.7,  dodgeHorizon: 0,    dodgeMargin: 0,  ammoBudget: 2, leadFactor: 0,    powerupRange: 0, bounceAim: false },
+  normal: { label: "普通", aimSkill: 1.4, fireCooldown: [0.55, 1.1],  replanInterval: 0.4,  dodgeHorizon: 0.4,  dodgeMargin: 5,  ammoBudget: 3, leadFactor: 0.75, powerupRange: 4, bounceAim: false },
+  hard:   { label: "困难", aimSkill: 0.75, fireCooldown: [0.2, 0.45], replanInterval: 0.2,  dodgeHorizon: 1.1,  dodgeMargin: 16, ammoBudget: 4, leadFactor: 1.0,  powerupRange: 7, bounceAim: true },
 };
 
 // 墙体渲染

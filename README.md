@@ -20,6 +20,7 @@ Local multiplayer tank combat game with procedural maze generation, bullet ricoc
   - 智能躲弹 + 拦截预判射击 | Adaptive dodging + predictive aim
   - 近战反打决策 | Close-combat counter-attack logic
   - 识别对手道具调整策略、绕雷寻路、边打边布雷 | Reads opponent power-ups, avoids mines, drops mines while fighting
+  - 困难档:跳弹吊射、反弹激光狙、躲预瞄线 | Hard: bank shots, ricochet laser snipes & aim-line evasion
 - ⌨️ **键位自定义** | Rebindable controls (persisted locally)
 - 🖥️ **F11 全屏** | Fullscreen toggle with state memory
 - ✨ **手感特效** | Screen shake, muzzle flash, bullet trails & explosions
@@ -136,6 +137,7 @@ Zero runtime dependencies, pure frontend implementation.
 - **阶段 10**：护盾改「挡一发即碎」+ 屏幕震动 / 炮口火光 / 子弹拖尾
 - **阶段 11**：新道具穿墙弹 & 地雷 + AI 避雷 / 布雷
 - **阶段 12**：独立道具键 + 激光射线（预瞄虚线）替换穿墙弹 + 隐形地雷 + 道具自选组合 + 冒烟测试
+- **阶段 13**：AI 强度打磨——捡道具决策修正、激光精确运用、困难档跳弹吊射，headless 对战验证调参
 
 ---
 
