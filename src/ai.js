@@ -18,7 +18,9 @@
 //           （远距守纪律/近战放开到 maxAlive-1）、命中质量（窗口=几何必中角
 //           ×难度技巧系数，对「拦截点」评估——持续估计敌速度解拦截方程，
 //           打"你将到的位置"；打横移目标当前位置是计算出的必失，会忍住）
-// 不做的：弹道预判射击、跳弹瞄准（难度升级留给后续阶段）。
+// 上述为阶段 6 基座；阶段 11-14 陆续叠加：避雷/布雷、捡道具决策、拦截预判、
+// 跳弹吊射（hard）、激光 hitscan 精确开火、敌方激光预瞄线全路径躲避——
+// 各机制的细节见对应代码段注释与 CLAUDE.md 模块职责。
 // ============================================================
 
 import { AI, AI_DIFFICULTY, CELL_SIZE, TANK, BULLET, POWERUP } from "./config.js";
@@ -63,14 +65,25 @@ function segmentHitsWalls(x1, y1, x2, y2, walls) {
   return false;
 }
 
-// 直线路径是否擦过任何危险圈（hazard = {x, y, r}，目前是地雷警戒圈）。
-// 擦圈就别走这条直线——移动层的避雷检查（躲弹罚分 / 直追改道共用）。
+// 直线路径是否擦过任何危险圈（hazard = {x, y, r}，地雷警戒圈 / 激光线采样圈）。
+// 擦圈就别走这条直线——移动层的避障检查（躲弹罚分 / 直追改道共用）。
 function lineNearHazard(x1, y1, x2, y2, hazards) {
   for (const h of hazards) {
     const cp = closestPointOnSegment(h.x, h.y, x1, y1, x2, y2);
     if (Math.hypot(h.x - cp.x, h.y - cp.y) < h.r) return true;
   }
   return false;
+}
+
+// 点到折线（顶点数组）的最短距离——敌方激光预瞄线的压线判定用。
+// 导出供冒烟测试直接验证几何。
+export function distToPolyline(x, y, pts) {
+  let best = Infinity;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const cp = closestPointOnSegment(x, y, pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y);
+    best = Math.min(best, Math.hypot(x - cp.x, y - cp.y));
+  }
+  return best;
 }
 
 // 线段是否撞到 except 以外的任意墙（跳弹解的遮挡检查用——反弹点就在
@@ -283,6 +296,10 @@ export class AiController {
     // 跳弹吊射（hard 专属）：反弹解缓存 + 0.25s 重算节流
     this.bounceShot = null;
     this.bounceTimer = 0;
+
+    // 敌方激光预瞄线路径（每帧重算；null = 敌人没持激光或本档不感知）。
+    // 挂在实例上是为了让 pickPowerupTarget 能过滤"落在线上的饵"。
+    this.enemyLaserPath = null;
   }
 
   // 每帧调用。world = { maze, players, bullets, powerups, mines }。
@@ -326,6 +343,54 @@ export class AiController {
     const mineBlocked = mineHazards.length
       ? new Set(mineHazards.map((h) => `${Math.floor(h.x / CELL_SIZE)},${Math.floor(h.y / CELL_SIZE)}`))
       : null;
+
+    // —— 敌方激光预瞄线 → 全路径静态危险带 ——
+    // 激光是瞬时 hitscan：线上任何点被击中的延迟只是对手的反应时间，与离炮口
+    // 远近无关。所以不能只靠"虚拟弹速×预判窗"的投影语义感知它——那样 10 格长
+    // 的杀伤线只有炮口前 600×dodgeHorizon 像素被当回事（normal 仅 2.5 格），
+    // 实测 AI 会大摇大摆开进线里送死。改为直接消费与预瞄虚线同源的
+    // castLaserPath 全路径（含反弹段。信息对称：这条线人类玩家屏幕上全程
+    // 可见，AI 读同一份几何不算开挂）：
+    //   ① 沿线采样成危险圈，与地雷共用移动层三件套（躲弹罚分/直追改道/BFS 绕格）
+    //   ② 车身压线（含反弹段）→ 直接触发闪避机动横移下线（见躲弹段）
+    //   ③ 压线时禁用贴脸反打（见 counterAttack）——朝架好的枪口冲锋是自杀
+    // 近炮口 laserMuzzleExempt 格内的采样不进寻路封锁/直追改道：交战终归要
+    // 接近持枪人，封死其所在格会让 BFS 判不可达退化成直怼，反而更危险。
+    // easy 档 dodgeHorizon=0 整套跳过（不躲弹的档位保持好欺负，是设计）。
+    let laserPath = null;
+    const laserHazards = [];    // 全部采样：躲弹罚分 / 压线判定 / 道具过滤用
+    const laserFarHazards = []; // 炮口豁免圈外的采样：直追改道 / BFS 封格用
+    if (enemyHasLaser && this.cfg.dodgeHorizon > 0) {
+      const em = enemy.muzzlePoint();
+      laserPath = castLaserPath(em.x, em.y, em.angle, world.maze.walls);
+      const exempt = CELL_SIZE * AI.laserMuzzleExempt;
+      for (let i = 0; i < laserPath.length - 1; i++) {
+        const ax = laserPath[i].x, ay = laserPath[i].y;
+        const dx = laserPath[i + 1].x - ax, dy = laserPath[i + 1].y - ay;
+        const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / AI.laserHazardStep));
+        for (let s = 0; s <= steps; s++) {
+          const h = { x: ax + (dx * s) / steps, y: ay + (dy * s) / steps, r: AI.laserHazardRadius };
+          laserHazards.push(h);
+          if (Math.hypot(h.x - enemy.x, h.y - enemy.y) > exempt) laserFarHazards.push(h);
+        }
+      }
+    }
+    this.enemyLaserPath = laserPath;
+    // 车身是否已压在杀伤线上（半径 + 难度安全余量，hard 余量大反应更早）
+    const onLaserLine = laserPath !== null &&
+      distToPolyline(self.x, self.y, laserPath) < TANK.radius + BULLET.radius + this.cfg.dodgeMargin;
+
+    // 移动层障碍合流：躲弹罚分看全部激光采样（贴炮口的线一样致命），
+    // 直追改道/BFS 封格只看豁免圈外的（理由见上）
+    const moveHazards = mineHazards.concat(laserHazards);
+    const chaseHazards = mineHazards.concat(laserFarHazards);
+    let blockedCells = mineBlocked;
+    if (laserFarHazards.length) {
+      blockedCells = new Set(blockedCells ?? []);
+      for (const h of laserFarHazards) {
+        blockedCells.add(`${Math.floor(h.x / CELL_SIZE)},${Math.floor(h.y / CELL_SIZE)}`);
+      }
+    }
 
     // 开火冷却流逝：近战圈/狂暴模式按倍速燃烧（快速连发）
     // 避战模式不加速（不急着开火）
@@ -392,7 +457,8 @@ export class AiController {
     //   - 狂暴模式（自己有护盾）：放宽反打距离到中距，主动进攻
     //   - 避战模式（敌人有护盾未到期）：禁用反打——打了也白打
     const counterAttackRange = berserkMode ? AI.closeCombatRange * 1.5 : AI.closeCombatRange;
-    const counterAttack = !avoidMode && los && gunReady && enemyDist < counterAttackRange;
+    const counterAttack = !avoidMode && los && gunReady && enemyDist < counterAttackRange
+      && !onLaserLine; // 压在敌方激光预瞄线上时不反打——先横移下线，再谈交火
 
     // 交战压制：敌人就在眼前（有视线且 <2.5 格）时不做捡道具决策——
     // 当面转身跑去捡东西等于把侧背卖给对方，打完或甩开视线再说。
@@ -414,22 +480,31 @@ export class AiController {
     // 不锁的话脱靶向量随双方移动逐帧翻面，AI 会左右抽搐；
     // 锁定期内威胁消失也把机动做完（半途折返等于没躲）。
     // 狂暴模式（自己有护盾）：完全不躲弹，直接冲锋（无敌状态）
-    // 对手持激光且互有视线：把它的首段预瞄射线当作一颗高速虚拟子弹，
-    // 与真实弹一起喂给威胁检测/闪避评分——预瞄线压到自己身上就触发闪避
-    // （横移离开射线）；不压身则最近逼近距离大，天然不触发。零新逻辑复用躲弹管线。
+    // 对手持激光：把预瞄线的每一段都注入为一颗高速虚拟子弹，与真实弹一起喂给
+    // 威胁检测/闪避评分——按段注入让反弹段同样被感知；路径来自真实几何投射，
+    // 隔墙的段就是真实杀伤线，不存在旧版直线外推的穿墙误报，故不再需要 los 门。
+    // 虚拟弹在这里的主要价值是给闪避评分提供"哪个航向在远离线"的梯度；
+    // 压线的即时警报由下方 laserDanger 兜底（不受虚拟弹时间窗限制）。
     // 注：曾试过把敌人普通炮口射线也注入（"看炮口预动"），arena 实测是毒药——
     // 追击中炮口互指是常态，会让 AI 陷入永久闪避不开火，已回滚。激光预瞄不同：
     // 它只在敌人真的持激光时存在，且预瞄线暴露的是即将发生的瞬时必杀。
     let threatBullets = world.bullets;
-    if (enemyHasLaser && los) {
-      const em = enemy.muzzlePoint();
-      threatBullets = threatBullets.concat([{
-        x: em.x,
-        y: em.y,
-        vx: Math.cos(em.angle) * 600,
-        vy: Math.sin(em.angle) * 600,
-        dead: false,
-      }]);
+    if (laserPath) {
+      const virtual = [];
+      for (let i = 0; i < laserPath.length - 1; i++) {
+        const dx = laserPath[i + 1].x - laserPath[i].x;
+        const dy = laserPath[i + 1].y - laserPath[i].y;
+        const len = Math.hypot(dx, dy);
+        if (len < 1e-6) continue;
+        virtual.push({
+          x: laserPath[i].x,
+          y: laserPath[i].y,
+          vx: (dx / len) * AI.laserVirtualSpeed,
+          vy: (dy / len) * AI.laserVirtualSpeed,
+          dead: false,
+        });
+      }
+      threatBullets = threatBullets.concat(virtual);
     }
 
     let turn, move;
@@ -438,9 +513,12 @@ export class AiController {
     const threat = !counterAttack && !berserkMode && this.cfg.dodgeHorizon > 0
       ? this.findThreat(self, threatBullets)
       : null;
-    if (threat && this.dodgeTimer <= 0) {
+    // 压线即险，不等虚拟弹的时间窗——hitscan 从"对准"到"击中"只隔对手的
+    // 反应时间，与离炮口距离无关。狂暴（有盾）例外：盾能吃下这发激光，冲锋是赚的
+    const laserDanger = onLaserLine && !counterAttack && !berserkMode;
+    if ((threat || laserDanger) && this.dodgeTimer <= 0) {
       this.dodgeHeading = pickDodgeHeading(
-        self, threatBullets, world.maze.walls, this.cfg.dodgeHorizon, mineHazards
+        self, threatBullets, world.maze.walls, this.cfg.dodgeHorizon, moveHazards
       );
       this.dodgeTimer = AI.dodgeCommit;
     }
@@ -515,11 +593,11 @@ export class AiController {
           : los;
       }
 
-      // 直追前的避雷检查：直线路径擦过任何雷的警戒圈 → 放弃直追改走 BFS
-      // 绕格（BFS 的 blocked 已把雷格排除）。躲弹机动不受此限（保命优先，
-      // pickDodgeHeading 自己会对扫雷航向罚分）。
-      if (goalLos && mineHazards.length &&
-          lineNearHazard(self.x, self.y, goal.x, goal.y, mineHazards)) {
+      // 直追前的避障检查：直线路径擦过雷的警戒圈或敌方激光线（豁免圈外）
+      // → 放弃直追改走 BFS 绕格（blocked 已把雷格/线格排除）。躲弹机动
+      // 不受此限（保命优先，pickDodgeHeading 自己会对扫障航向罚分）。
+      if (goalLos && chaseHazards.length &&
+          lineNearHazard(self.x, self.y, goal.x, goal.y, chaseHazards)) {
         goalLos = false;
       }
 
@@ -544,7 +622,7 @@ export class AiController {
           || this.pathGoalCell.c !== goalCell.c || this.pathGoalCell.r !== goalCell.r;
         if (this.replanTimer <= 0 || this.path.length === 0 || goalChanged) {
           this.replanTimer = this.cfg.replanInterval;
-          this.path = findPath(world.maze, cellOf(self, world.maze), goalCell, mineBlocked);
+          this.path = findPath(world.maze, cellOf(self, world.maze), goalCell, blockedCells);
           this.pathGoalCell = goalCell;
         }
         // 走到路点格中心附近就弹出，奔向下一个（while：一帧可能跨过多个）
@@ -740,6 +818,13 @@ export class AiController {
 
       const d = Math.hypot(p.x - self.x, p.y - self.y);
       if (d > range) continue; // ② 超出感知范围
+
+      // ⑥ 线上的饵不吃：道具落在敌方激光预瞄线的杀伤带上，去捡 = 主动压线
+      // 挨枪。等对手转开炮口（线每帧重算）这个道具自然解禁。
+      if (this.enemyLaserPath &&
+          distToPolyline(p.x, p.y, this.enemyLaserPath) < POWERUP.radius + AI.laserHazardRadius) {
+        continue;
+      }
 
       // ⑤ 机会成本：与敌对峙中（有视线）时，道具必须明显更近（< 敌距×0.8）
       // 才值得转身去拿——去捡的路上背身挨打，捡回来的收益盖不住亏损

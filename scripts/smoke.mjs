@@ -2,9 +2,10 @@
 // smoke.mjs — 纯逻辑模块冒烟测试(node 直跑,无需浏览器/Electron)
 // 运行:npm run smoke
 // 覆盖:激光路径几何、tryFire 契约、武器槽互斥、布雷/持雷超时、
-//       地雷可见度时间线、子弹反弹、键位表完整性、AI 三档指令冒烟。
+//       地雷可见度时间线、子弹反弹、键位表完整性、AI 三档指令冒烟、
+//       AI 躲激光预瞄线(全路径感知/反弹段/压线反打让位/线上饵过滤)。
 // 只测纯逻辑(config/collision/maze/bullet/tank/mine/laser/ai);
-// 渲染与交互仍靠 npm start 手动过验收点。
+// 渲染与交互仍靠 npm start 手动过验收点;AI 强度量化看 npm run arena。
 // ============================================================
 
 import { Tank } from "../src/tank.js";
@@ -13,6 +14,7 @@ import { Mine } from "../src/mine.js";
 import { castLaserPath } from "../src/laser.js";
 import { generateMaze } from "../src/maze.js";
 import { AiController, findBounceShot } from "../src/ai.js";
+import { closestPointOnSegment } from "../src/collision.js";
 import { POWERUP, TANK, KEY_BINDINGS, BULLET, CELL_SIZE } from "../src/config.js";
 
 let pass = 0;
@@ -249,6 +251,118 @@ section("AI 捡道具机会成本");
   const nearPw = { x: 200 - CELL_SIZE * 0.8, y: 200, type: "shield", taken: false };
   check("明显更近的道具仍然拿",
     ai.pickPowerupTarget(bot.tank, [nearPw], world([enemy, bot], [nearPw]), false) === nearPw);
+}
+
+// ============================================================
+section("AI 躲激光预瞄线 (全路径感知)");
+{
+  // 10×5 开阔场地（只有边界墙）：宽度 960 = 激光总长上限，可测最远端感知。
+  // cells 用真实开阔格子图——AI 会对激光带做 BFS 绕行，null 会崩。
+  const COLS = 10, ROWS = 5;
+  const W = COLS * CELL_SIZE, H = ROWS * CELL_SIZE;
+  const walls = [
+    { x1: 0, y1: 0, x2: W, y2: 0 },
+    { x1: W, y1: 0, x2: W, y2: H },
+    { x1: W, y1: H, x2: 0, y2: H },
+    { x1: 0, y1: H, x2: 0, y2: 0 },
+  ];
+  const cells = Array.from({ length: ROWS }, (_, r) =>
+    Array.from({ length: COLS }, (_, c) => ({
+      top: r === 0, bottom: r === ROWS - 1, left: c === 0, right: c === COLS - 1,
+    }))
+  );
+  const mkP = (tank) => ({ tank, get alive() { return this.tank.alive; } });
+  const mkWorld = (a, b) => ({
+    maze: { cols: COLS, rows: ROWS, walls, cells },
+    players: [a, b], bullets: [], powerups: [], mines: [],
+  });
+  // 持激光的敌人在东侧朝西架线（预瞄线沿 y=240 贯穿全场）
+  const holder = () => {
+    const t = new Tank(864, 240, Math.PI, "#111");
+    t.applyPowerup("laser");
+    return t;
+  };
+  // 真实激光路径此刻能否杀掉 bot（与 main.fireLaser 同判定）
+  const killable = (camper, bot) => {
+    const m = camper.muzzlePoint();
+    const pts = castLaserPath(m.x, m.y, m.angle, walls);
+    for (let i = 0; i < pts.length - 1; i++) {
+      const cp = closestPointOnSegment(bot.x, bot.y, pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y);
+      if (Math.hypot(bot.x - cp.x, bot.y - cp.y) < TANK.radius) return true;
+    }
+    return false;
+  };
+
+  // 压线即警觉，与离炮口距离无关（旧实现 normal 只感知炮口前 2.5 格）；
+  // easy 保持无感是设计（不躲弹的档位好欺负）
+  for (const [level, expect] of [["easy", false], ["normal", true], ["hard", true]]) {
+    const E = mkP(holder());
+    const bot = mkP(new Tank(96, 240, 0, "#222")); // 在线上，离炮口 7.6 格
+    const ai = new AiController(bot, level);
+    ai.update(1 / 60, mkWorld(E, bot));
+    check(`${level} 压线远端${expect ? "触发闪避" : "无感(设计)"}`, (ai.dodgeTimer > 0) === expect);
+  }
+
+  // 反弹段同样感知：敌人 45° 打南墙，bot 恰在反弹段上（首段不指向它）
+  {
+    const E = mkP(new Tank(480, 384, Math.PI / 4, "#111"));
+    E.tank.applyPowerup("laser");
+    const bot = mkP(new Tank(624, 432, Math.PI, "#222"));
+    const ai = new AiController(bot, "normal");
+    ai.update(1 / 60, mkWorld(E, bot));
+    check("normal 压反弹段触发闪避", ai.dodgeTimer > 0, killable(E.tank, bot.tank) ? "" : "夹具失效:不在线上");
+  }
+
+  // 压线时反打让位：贴脸+有视线+枪就绪本该反打，但正对架好的枪口时改为闪避下线
+  {
+    const E = mkP(holder());
+    const bot = mkP(new Tank(864 - CELL_SIZE * 1.2, 240, 0, "#222"));
+    const ai = new AiController(bot, "hard");
+    ai.fireTimer = -1;
+    ai.update(1 / 60, mkWorld(E, bot));
+    check("贴脸压线不反打而是闪避", ai.dodgeTimer > 0);
+  }
+
+  // 离线不误报：距线 140px、场上无真实子弹 → 不触发闪避（防"永久闪避"回归）
+  {
+    const E = mkP(holder());
+    const bot = mkP(new Tank(480, 100, 0, "#222"));
+    const ai = new AiController(bot, "hard");
+    ai.update(1 / 60, mkWorld(E, bot));
+    check("离线不误报闪避", ai.dodgeTimer <= 0);
+  }
+
+  // 线上的道具是饵：压线道具被过滤，离线道具照捡
+  {
+    const E = mkP(holder());
+    const bot = mkP(new Tank(300, 400, 0, "#222"));
+    const ai = new AiController(bot, "hard");
+    const w = mkWorld(E, bot);
+    ai.update(1 / 60, w); // 先跑一帧填 enemyLaserPath
+    const bait = { x: 400, y: 240, type: "shield", taken: false };
+    const safe = { x: 400, y: 430, type: "shield", taken: false };
+    check("压线道具被过滤", ai.pickPowerupTarget(bot.tank, [bait], w, false) === null);
+    check("离线道具照捡", ai.pickPowerupTarget(bot.tank, [safe], w, false) === safe);
+  }
+
+  // 行为回归：静止架线正对走廊，AI 从线上远端自主行动 10 秒——
+  // 「连续 0.2s 可杀」窗口至多 1 个（出生在线上的逃离瞬态；旧实现 normal 5 个）
+  for (const level of ["normal", "hard"]) {
+    const E = mkP(holder());
+    const bot = mkP(new Tank(96, 240, 0, "#222"));
+    const ai = new AiController(bot, level);
+    const w = mkWorld(E, bot);
+    let streak = 0, windows = 0;
+    for (let f = 0; f < 600; f++) {
+      const c = ai.update(1 / 60, w);
+      bot.tank.update(1 / 60, walls, c);
+      if (killable(E.tank, bot.tank)) {
+        streak++;
+        if (streak === 12) windows++;
+      } else streak = 0;
+    }
+    check(`${level} 架线接近 10s 稳杀窗口≤1`, windows <= 1, `windows=${windows}`);
+  }
 }
 
 // ============================================================

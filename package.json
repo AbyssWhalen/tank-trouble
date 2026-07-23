@@ -6,6 +6,7 @@
   "scripts": {
     "start": "electron .",
     "smoke": "node scripts/smoke.mjs",
+    "arena": "node scripts/arena.mjs",
     "dist": "electron-builder --win"
   },
   "author": "Whalen",
