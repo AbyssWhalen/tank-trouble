@@ -12,7 +12,8 @@
 //   localStorage["tank-trouble.settings.v1"] = {
 //     version: 1,
 //     bindings: [{forward,back,left,right,fire,special} × 2],
-//     powerups: ["scatter", ...]   // 菜单启用的道具类型
+//     powerups: ["scatter", ...],  // 菜单启用的道具类型
+//     audio: { muted: false }      // 音效静音开关
 //   }
 // ============================================================
 
@@ -87,4 +88,16 @@ export function loadEnabledPowerups() {
 // 菜单勾选变化时写盘
 export function saveEnabledPowerups(types) {
   writeStore({ powerups: types });
+}
+
+// 读音效静音状态：没存过/非法返回 null（调用方落默认有声）
+export function loadAudioMuted() {
+  const data = readStore();
+  if (!data || typeof data.audio !== "object" || !data.audio) return null;
+  return typeof data.audio.muted === "boolean" ? data.audio.muted : null;
+}
+
+// 静音开关切换时写盘
+export function saveAudioMuted(m) {
+  writeStore({ audio: { muted: !!m } });
 }

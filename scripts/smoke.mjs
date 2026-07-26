@@ -15,7 +15,7 @@ import { castLaserPath } from "../src/laser.js";
 import { generateMaze } from "../src/maze.js";
 import { AiController, findBounceShot } from "../src/ai.js";
 import { closestPointOnSegment } from "../src/collision.js";
-import { POWERUP, TANK, KEY_BINDINGS, BULLET, CELL_SIZE } from "../src/config.js";
+import { POWERUP, TANK, KEY_BINDINGS, BULLET, CELL_SIZE, SFX, PICKUP_RATE } from "../src/config.js";
 
 let pass = 0;
 let fail = 0;
@@ -400,6 +400,52 @@ for (const level of ["easy", "normal", "hard"]) {
     err = e.stack.split("\n")[0];
   }
   check(`${level} 档 300 帧`, ok, err);
+}
+
+// ============================================================
+section("音效 spec 表 (SFX/PICKUP_RATE)");
+{
+  // audio.js 是浏览器专属（Web Audio），smoke 只验 config 里的纯数据表：
+  // 事件齐全 + 每层参数在合法区间，接线正确性靠 npm start 实听。
+  const expected = [
+    "shoot", "shootScatter", "laser", "kill", "shieldBreak", "pickup",
+    "mineDeploy", "mineBlast", "roundWin", "roundDraw", "uiClick", "uiError",
+  ];
+  const names = Object.keys(SFX);
+  check("12 个事件名双向齐全",
+    expected.every((n) => names.includes(n)) && names.every((n) => expected.includes(n)),
+    `实有 ${names.length} 个`);
+
+  const WAVES = ["sine", "square", "sawtooth", "triangle"];
+  const FILTERS = ["lowpass", "highpass", "bandpass"];
+  let layersOk = true;
+  let bad = "";
+  for (const [name, layers] of Object.entries(SFX)) {
+    if (!Array.isArray(layers) || layers.length < 1 || layers.length > 3) {
+      layersOk = false; bad = `${name} 层数非法`; break;
+    }
+    for (const l of layers) {
+      const durOk = l.dur > 0 && l.dur <= 2;
+      const gainOk = l.gain > 0 && l.gain <= 0.7;
+      const delayOk = l.delay === undefined || (l.delay >= 0 && l.delay < 1);
+      const freqOk = (f) => Array.isArray(f) && f.length === 2 && f.every((v) => v >= 30 && v <= 8000);
+      let typeOk = false;
+      if (l.type === "tone") typeOk = WAVES.includes(l.wave) && freqOk(l.freq);
+      else if (l.type === "noise") typeOk = l.filter === undefined || (FILTERS.includes(l.filter.kind) && freqOk(l.filter.freq));
+      if (!(durOk && gainOk && delayOk && typeOk)) {
+        layersOk = false; bad = `${name}: ${JSON.stringify(l)}`; break;
+      }
+    }
+    if (!layersOk) break;
+  }
+  check("所有层参数在合法区间", layersOk, bad);
+
+  const peak = (name) => Math.max(...SFX[name].map((l) => l.gain));
+  check("音量层次 kill > shoot > uiClick",
+    peak("kill") > peak("shoot") && peak("shoot") > peak("uiClick"));
+
+  check("PICKUP_RATE 覆盖全部道具类型且倍率合理",
+    POWERUP.types.every((t) => typeof PICKUP_RATE[t] === "number" && PICKUP_RATE[t] > 0.5 && PICKUP_RATE[t] < 2));
 }
 
 // ============================================================

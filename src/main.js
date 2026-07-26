@@ -17,7 +17,7 @@
 import {
   CANVAS, PLAYER_COLORS, KEY_BINDINGS, MAZE_TIERS, TIER_POOL_BY_MODE,
   WALL, CELL_SIZE, BULLET, TANK, THEME, ROUND_RESTART_DELAY,
-  POWERUP,
+  POWERUP, PICKUP_RATE,
 } from "./config.js";
 import { Player } from "./player.js";
 import { generateMaze } from "./maze.js";
@@ -40,7 +40,9 @@ import {
 import {
   initSettings, saveBindings, resetBindings,
   loadEnabledPowerups, saveEnabledPowerups,
+  loadAudioMuted, saveAudioMuted,
 } from "./settings.js";
+import { initAudio, playSfx, toggleMuted, isMuted } from "./audio.js";
 
 const canvas = document.getElementById("game-canvas");
 const ctx = canvas.getContext("2d");
@@ -73,6 +75,9 @@ bindMouse(canvas);
 
 // 启动时套用持久化设置（键位覆写 KEY_BINDINGS 前两套，重启不丢）
 initSettings();
+
+// 音效：读静音存档 + 挂手势解锁监听（Chromium autoplay policy）
+initAudio(loadAudioMuted() ?? false);
 
 // —— 游戏状态机 ——
 const STATE = { MENU: "menu", PLAYING: "playing", PAUSED: "paused", ROUND_OVER: "round_over" };
@@ -219,10 +224,15 @@ function updateMenu(dt) {
       else enabledPowerups.add(action.key);
       saveEnabledPowerups([...enabledPowerups]);
       break;
+    case "toggleMute":
+      saveAudioMuted(toggleMuted());
+      break;
     case "mode":
       startMatch(action.mode);
       break;
   }
+  // 点击音在 switch 之后：切到静音那下无声、解除静音那下有反馈，语义自洽
+  playSfx("uiClick");
 }
 
 // 键位设置面板：捕获按键 → 校验（保留键/冲突）→ 写入 KEY_BINDINGS + 存盘。
@@ -233,9 +243,10 @@ function updateRebind(dt) {
     rebind.msgTimer -= dt;
     if (rebind.msgTimer <= 0) rebind.conflictMsg = "";
   }
-  const flash = (msg) => {
+  const flash = (msg, isError = true) => {
     rebind.conflictMsg = msg;
     rebind.msgTimer = 2.2;
+    if (isError) playSfx("uiError");
   };
 
   // 1) 捕获态：吃掉本帧按下的第一个键
@@ -281,7 +292,8 @@ function updateRebind(dt) {
   } else if (action.type === "reset") {
     resetBindings();
     rebind.capturing = null;
-    flash("已恢复默认键位");
+    flash("已恢复默认键位", false); // 成功提示不播错误音
+    playSfx("uiClick");
   } else if (action.type === "close") {
     rebind.open = false;
     rebind.capturing = null;
@@ -349,6 +361,7 @@ function updatePlaying(dt) {
         p.tank.applyPowerup(pw.type);
         pw.taken = true; // 标记，循环后统一过滤（避免边遍历边删）
         effects.push(new PickupFlash(pw.x, pw.y, pw.type));
+        playSfx("pickup", { rate: PICKUP_RATE[pw.type] ?? 1 });
       }
     }
   }
@@ -367,6 +380,7 @@ function updatePlaying(dt) {
     m.exploded = true;
     effects.push(new MineBlast(m.x, m.y));
     addShake(6, 0.35);
+    playSfx("mineBlast");
     for (const p of players) {
       if (!p.alive) continue;
       if (Math.hypot(p.tank.x - m.x, p.tank.y - m.y) >= POWERUP.mine.blastRadius) continue;
@@ -374,9 +388,11 @@ function updatePlaying(dt) {
         p.tank.shield = false;
         p.tank.shieldTimer = 0;
         effects.push(new ShieldBreak(p.tank.x, p.tank.y, THEME.shieldRing));
+        playSfx("shieldBreak");
       } else {
         p.tank.alive = false;
         effects.push(new TankExplosion(p.tank.x, p.tank.y, p.color));
+        playSfx("kill");
       }
     }
   }
@@ -389,12 +405,16 @@ function updatePlaying(dt) {
     const res = players[i].tank.tryFire(bullets, controls[i].fire, maze.walls);
     if (res.bullets.length > 0) {
       effects.push(new MuzzleFlash(res.bullets[0].x, res.bullets[0].y, players[i].tank.angle));
+      playSfx(res.bullets.length > 1 ? "shootScatter" : "shoot"); // 散射一炮一个音
     }
     for (const b of res.bullets) bullets.push(b);
     if (res.laser) fireLaser(res.laser);
 
     const mine = players[i].tank.tryDeploy(controls[i].special, maze.walls);
-    if (mine) mines.push(mine);
+    if (mine) {
+      mines.push(mine);
+      playSfx("mineDeploy");
+    }
   }
 
   // 4) 子弹更新（移动 + 反弹）
@@ -417,12 +437,14 @@ function updatePlaying(dt) {
           b.dead = true;
           effects.push(new ShieldBreak(p.tank.x, p.tank.y, THEME.shieldRing));
           addShake(3, 0.2);
+          playSfx("shieldBreak");
         } else {
           b.dead = true;
           p.tank.alive = false;
           // 死亡演出：烟团 + 碎片四散 + 屏幕震动（纯表现，不影响逻辑）
           effects.push(new TankExplosion(p.tank.x, p.tank.y, p.color));
           addShake(5, 0.3);
+          playSfx("kill");
         }
         break; // 一颗子弹只打一个
       }
@@ -443,6 +465,7 @@ function updatePlaying(dt) {
     if (winner) matchScores[winner.index]++;
     roundOverTimer = ROUND_RESTART_DELAY; // 启动自动重开倒计时
     state = STATE.ROUND_OVER;
+    playSfx(winner ? "roundWin" : "roundDraw"); // 状态切走后不再进本函数，天然只播一次
   }
 }
 
@@ -481,10 +504,12 @@ function fireLaser(origin) {
         tank.shieldTimer = 0;
         effects.push(new ShieldBreak(tank.x, tank.y, THEME.shieldRing));
         addShake(3, 0.2);
+        playSfx("shieldBreak");
       } else {
         tank.alive = false;
         effects.push(new TankExplosion(tank.x, tank.y, hit.p.color));
         addShake(5, 0.3);
+        playSfx("kill");
       }
       break;
     }
@@ -493,6 +518,7 @@ function fireLaser(origin) {
   effects.push(new LaserBeam(pts));
   effects.push(new MuzzleFlash(origin.x, origin.y, origin.angle));
   addShake(4, 0.25);
+  playSfx("laser");
 }
 
 function updatePaused() {
@@ -505,6 +531,7 @@ function updatePaused() {
   if (!isClicked()) return;
   const { x: mx, y: my } = getMousePos();
   const action = pauseAction(mx, my);
+  if (action) playSfx("uiClick");
   if (action === "resume") {
     state = STATE.PLAYING;
   } else if (action === "menu") {
@@ -539,7 +566,7 @@ function render() {
 
   switch (state) {
     case STATE.MENU:
-      renderMenu(ctx, { mouse: getMousePos(), aiLevel, enabledPowerups, showHelp });
+      renderMenu(ctx, { mouse: getMousePos(), aiLevel, enabledPowerups, showHelp, muted: isMuted() });
       if (rebind.open) {
         renderRebindOverlay(ctx, {
           mouse: getMousePos(),

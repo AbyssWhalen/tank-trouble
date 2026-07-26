@@ -51,6 +51,9 @@ const helpBtn = { x: CANVAS.width - 56, y: CANVAS.height - 56, r: 20 };
 // —— 键位设置按钮（左下角圆形按钮，与右下 "?" 对称）——
 const rebindBtn = { x: 56, y: CANVAS.height - 56, r: 20 };
 
+// —— 音效开关按钮（「键」按钮右侧，同规格，设置类按钮成组）——
+const audioBtn = { x: 108, y: CANVAS.height - 56, r: 20 };
+
 // —— 键位设置面板（居中浮窗）：布局常量 + 每个键位 chip 的命中矩形 ——
 const REBIND_PANEL = { w: 620, h: 540 };
 REBIND_PANEL.x = (CANVAS.width - REBIND_PANEL.w) / 2;
@@ -152,6 +155,7 @@ export function menuAction(mx, my, { showHelp }) {
   if (showHelp) return { type: "closeHelp" };
   if (hitCircle(mx, my, helpBtn.x, helpBtn.y, helpBtn.r)) return { type: "openHelp" };
   if (hitCircle(mx, my, rebindBtn.x, rebindBtn.y, rebindBtn.r)) return { type: "openRebind" };
+  if (hitCircle(mx, my, audioBtn.x, audioBtn.y, audioBtn.r)) return { type: "toggleMute" };
   for (const c of difficultyChips) {
     if (hitRect(mx, my, c)) return { type: "aiLevel", key: c.key };
   }
@@ -270,9 +274,10 @@ export function renderMenu(ctx, view) {
     renderChip(ctx, c, c.label, selected, hover);
   }
 
-  // 玩法说明按钮（右下角圆形 "?"）+ 键位设置按钮（左下角）
+  // 玩法说明按钮（右下角圆形 "?"）+ 键位设置按钮（左下角）+ 音效开关
   renderHelpButton(ctx, mx, my);
   renderRebindButton(ctx, mx, my);
+  renderAudioButton(ctx, mx, my, view.muted);
 
   // 底部提示 + 快捷键
   ctx.fillStyle = THEME.textDim;
@@ -382,6 +387,34 @@ function renderRebindButton(ctx, mx, my) {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText("键", rebindBtn.x, rebindBtn.y + 1);
+}
+
+// 「键」按钮右侧的音效开关圆钮：♪ 有声 / 静音时画斜杠压在音符上
+function renderAudioButton(ctx, mx, my, muted) {
+  const hover = hitCircle(mx, my, audioBtn.x, audioBtn.y, audioBtn.r);
+  ctx.beginPath();
+  ctx.arc(audioBtn.x, audioBtn.y, audioBtn.r, 0, Math.PI * 2);
+  ctx.fillStyle = hover ? THEME.accent : THEME.btnFill;
+  ctx.fill();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = THEME.accent;
+  ctx.stroke();
+
+  const fg = hover ? "#ffffff" : muted ? THEME.textDim : THEME.accent;
+  ctx.fillStyle = fg;
+  ctx.font = "bold 16px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("♪", audioBtn.x, audioBtn.y + 1);
+  if (muted) {
+    // 斜杠盖在音符上表示静音（不换字形，避免字体缺 emoji 静音符）
+    ctx.strokeStyle = fg;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(audioBtn.x - 9, audioBtn.y + 9);
+    ctx.lineTo(audioBtn.x + 9, audioBtn.y - 9);
+    ctx.stroke();
+  }
 }
 
 // 键位设置面板。view = { mouse, capturing: {player, action}|null, conflictMsg }

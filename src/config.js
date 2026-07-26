@@ -244,6 +244,78 @@ export const POWERUP = {
 };
 
 // ============================================================
+// 音效 spec 表（程序合成，零素材文件；接线在 audio.js，此处纯数据）
+// 每个事件 = 层数组（1~3 层叠加出厚度），两类层：
+//   振荡器层 { type:"tone", wave, freq:[f0,f1], dur, gain, attack?, delay? }
+//     freq 从 f0 指数滑到 f1（Hz），滑音是"游戏感"的核心
+//   噪声层   { type:"noise", dur, gain, attack?, delay?, filter?:{kind, freq:[f0,f1]} }
+//     白噪声过 biquad 滤波，截止频率 f0→f1 指数扫频（爆炸的"轰隆收尾"）
+// 公共字段：dur 时长(秒)、gain 峰值(主音量前)、attack 起音(默认 0.002)、
+//           delay 层起播偏移(默认 0，错开即琶音)
+// 音量层次：击杀/爆炸(0.5~0.6) > 激光(0.28) > 开炮(0.22~0.28) > 拾取/结算(≈0.2) > UI(0.1)
+// ============================================================
+export const SFX = {
+  // 普通开炮：短促「砰」——方波下滑 + 一点噪声气声
+  shoot: [
+    { type: "tone", wave: "square", freq: [520, 160], dur: 0.09, gain: 0.22 },
+    { type: "noise", dur: 0.05, gain: 0.1, filter: { kind: "lowpass", freq: [3000, 800] } },
+  ],
+  // 散射开炮：更低更长更「重」（一炮多发是一个音，不是 pellets 次 shoot）
+  shootScatter: [
+    { type: "tone", wave: "square", freq: [300, 90], dur: 0.16, gain: 0.28 },
+    { type: "noise", dur: 0.12, gain: 0.18, filter: { kind: "lowpass", freq: [2500, 500] } },
+  ],
+  // 激光：能量 zap——锯齿大跨度下扫 + 高八度方波「电流嘶鸣」
+  laser: [
+    { type: "tone", wave: "sawtooth", freq: [1600, 220], dur: 0.35, gain: 0.28, attack: 0.01 },
+    { type: "tone", wave: "square", freq: [3200, 440], dur: 0.25, gain: 0.1, attack: 0.01 },
+  ],
+  // 坦克击杀：噪声爆 + 正弦低频「胸腔感」轰
+  kill: [
+    { type: "noise", dur: 0.5, gain: 0.5, filter: { kind: "lowpass", freq: [4000, 200] } },
+    { type: "tone", wave: "sine", freq: [220, 50], dur: 0.4, gain: 0.5 },
+  ],
+  // 破盾（护盾挡下=击破是同一事件，全游戏只此一音）：清脆下滑 + 高通噪声碎裂
+  shieldBreak: [
+    { type: "tone", wave: "triangle", freq: [2000, 500], dur: 0.28, gain: 0.3 },
+    { type: "noise", dur: 0.15, gain: 0.13, filter: { kind: "highpass", freq: [2000, 2000] } },
+  ],
+  // 道具拾取：上行双音确认；四种道具靠 PICKUP_RATE 整体变调区分
+  pickup: [
+    { type: "tone", wave: "triangle", freq: [660, 660], dur: 0.07, gain: 0.2 },
+    { type: "tone", wave: "triangle", freq: [990, 990], dur: 0.12, gain: 0.2, delay: 0.08 },
+  ],
+  // 布雷：低频闷「咚」+ 延迟短咔哒——与 mineBlast 同低频域（家族感呼应）
+  mineDeploy: [
+    { type: "tone", wave: "sine", freq: [180, 120], dur: 0.12, gain: 0.25 },
+    { type: "tone", wave: "square", freq: [1200, 1200], dur: 0.03, gain: 0.07, delay: 0.05 },
+  ],
+  // 地雷爆炸：比 kill 更深更长（对应全场最大震动 addShake(6)）
+  mineBlast: [
+    { type: "noise", dur: 0.7, gain: 0.6, filter: { kind: "lowpass", freq: [2500, 120] } },
+    { type: "tone", wave: "sine", freq: [120, 35], dur: 0.6, gain: 0.55 },
+  ],
+  // 回合胜利：C5-E5-G5 上行琶音
+  roundWin: [
+    { type: "tone", wave: "triangle", freq: [523, 523], dur: 0.12, gain: 0.22 },
+    { type: "tone", wave: "triangle", freq: [659, 659], dur: 0.12, gain: 0.22, delay: 0.12 },
+    { type: "tone", wave: "triangle", freq: [784, 784], dur: 0.3, gain: 0.22, delay: 0.24 },
+  ],
+  // 同归于尽：下行双音（低落感）
+  roundDraw: [
+    { type: "tone", wave: "triangle", freq: [440, 440], dur: 0.15, gain: 0.18 },
+    { type: "tone", wave: "triangle", freq: [330, 330], dur: 0.3, gain: 0.18, delay: 0.16 },
+  ],
+  // UI：菜单/暂停点击轻 tick；改键冲突/保留键低沉 buzz
+  uiClick: [{ type: "tone", wave: "triangle", freq: [700, 700], dur: 0.045, gain: 0.1 }],
+  uiError: [{ type: "tone", wave: "square", freq: [220, 180], dur: 0.18, gain: 0.13 }],
+};
+
+// 拾取音的道具变调（playbackRate 式整体倍率）：攻击性越强音越高，
+// 地雷偏低沉与其音效家族一致（1 / 大二度 / 大三度 / 下小六度附近取值）。
+export const PICKUP_RATE = { scatter: 1, shield: 1.125, laser: 1.25, mine: 0.84 };
+
+// ============================================================
 // 主题配色（浅色风，参考原版 Tank Trouble）
 // UI 颜色集中此处，render 只引用、不写死，方便整体调色。
 // ============================================================

@@ -25,6 +25,7 @@ Local multiplayer tank combat game with procedural maze generation, bullet ricoc
 - ⌨️ **键位自定义** | Rebindable controls (persisted locally)
 - 🖥️ **F11 全屏** | Fullscreen toggle with state memory
 - ✨ **手感特效** | Screen shake, muzzle flash, bullet trails & explosions
+- 🔊 **程序合成音效·零素材文件** | Procedurally synthesized SFX (Web Audio, zero asset files), mute toggle persisted
 - 🎯 **回合制计分** | Round-based scoring system
 - 📐 **自适应窗口** | Responsive viewport scaling
 
@@ -105,6 +106,7 @@ tank-trouble/
 │   ├── laser.js      # 激光射线 | Bouncing laser
 │   ├── powerup.js    # 道具刷新 | Power-up spawning
 │   ├── mine.js       # 地雷 | Mines
+│   ├── audio.js      # 程序合成音效 | Procedural SFX (Web Audio)
 │   ├── settings.js   # 设置持久化 | Settings persistence
 │   ├── collision.js  # 碰撞检测 | Collision detection
 │   └── effects.js    # 视觉特效 | Visual effects
@@ -140,6 +142,7 @@ Zero runtime dependencies, pure frontend implementation.
 - **阶段 12**：独立道具键 + 激光射线（预瞄虚线）替换穿墙弹 + 隐形地雷 + 道具自选组合 + 冒烟测试
 - **阶段 13**：AI 强度打磨——捡道具决策修正、激光精确运用、困难档跳弹吊射，headless 对战验证调参
 - **阶段 14**：AI 激光预瞄线防守——消费全程弹道（含反弹段）绕线走位、压线即避；AI 对打竞技场收进仓库（npm run arena）
+- **阶段 15**：程序合成音效系统（Web Audio 零素材，12 类事件音 + 菜单静音开关持久化）+ v0.2.0 发布
 
 ---
 
