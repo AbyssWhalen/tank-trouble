@@ -53,13 +53,13 @@ export const LEVELS = [
     hint: "预瞄线会暴露你——利用反弹打它看不到的角度",
   },
   {
-    id: 5, name: "雷区求生", desc: "在布满地雷的战场存活 45 秒",
+    id: 5, name: "雷区求生", desc: "存活 45 秒（或击败对手提前过关）",
     objective: "survive",
     map: { tier: "medium", style: "symmetric" },
     enemies: [{ level: "normal", spawn: "br" }],
     powerups: ["mine"], wallBreak: false, player: {},
     mutators: { surviveTime: 45 },
-    hint: "不必击杀，活着就是胜利——记住雷埋在哪",
+    hint: "躲满 45 秒就赢——敢反杀也行，条条大路通关",
   },
   {
     id: 6, name: "拆迁现场", desc: "炸墙全开，击败 2 名对手",
@@ -102,6 +102,8 @@ export function evaluateObjective(level, ctx) {
   if (!ctx.playerAlive) return "lose";
   switch (level.objective) {
     case "survive":
+      // 威胁清零 = 提前过关：敌人全灭后没必要在空场硬熬计时（用户实测反馈）
+      if (ctx.enemiesAlive === 0) return "win";
       return ctx.levelTimer >= (level.mutators.surviveTime ?? 60) ? "win" : null;
     case "eliminateTimed":
       if (ctx.enemiesAlive === 0) return "win";

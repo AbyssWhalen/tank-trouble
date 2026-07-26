@@ -727,9 +727,10 @@ section("关卡表与过关判定 (levels)");
   }
   {
     const surv = { objective: "survive", mutators: { surviveTime: 45 } };
-    check("生存关真值表",
+    check("生存关真值表（含歼灭提前过关）",
       evaluateObjective(surv, { playerAlive: true, enemiesAlive: 1, levelTimer: 44 }) === null &&
       evaluateObjective(surv, { playerAlive: true, enemiesAlive: 1, levelTimer: 45 }) === "win" &&
+      evaluateObjective(surv, { playerAlive: true, enemiesAlive: 0, levelTimer: 10 }) === "win" &&
       evaluateObjective(surv, { playerAlive: false, enemiesAlive: 1, levelTimer: 50 }) === "lose");
   }
   {
