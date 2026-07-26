@@ -184,11 +184,13 @@ export const AI_DIFFICULTY = {
   hard:   { label: "困难", aimSkill: 0.75, fireCooldown: [0.2, 0.45], replanInterval: 0.2,  dodgeHorizon: 1.1,  dodgeMargin: 16, ammoBudget: 4, leadFactor: 1.0,  powerupRange: 7, bounceAim: true },
 };
 
-// 墙体渲染
+// 墙体渲染 + 耐久
 export const WALL = {
   color: "#2b2b33",       // 深炭灰细线，在浅灰场地上利落分明（原版风）
   thickness: 5,           // 内墙线宽
   borderThickness: 8,     // 外框线宽（比内墙粗，框住整个竞技场，贴近截图的醒目灰框）
+  hp: 5,                  // 内墙耐久：被子弹撞击这么多次后碎掉（渲染按血量渐淡）；
+                          //   外墙 border 不受侵蚀；地雷炸墙无视血量直接炸
 };
 
 // 竞技场自适应缩放的视口预留（逻辑像素）。

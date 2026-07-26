@@ -12,7 +12,7 @@ import { Tank } from "../src/tank.js";
 import { Bullet } from "../src/bullet.js";
 import { Mine } from "../src/mine.js";
 import { castLaserPath } from "../src/laser.js";
-import { generateMaze, destroyWallsInRadius } from "../src/maze.js";
+import { generateMaze, destroyWallsInRadius, destroyWallSegments } from "../src/maze.js";
 import { AiController, findBounceShot } from "../src/ai.js";
 import { closestPointOnSegment } from "../src/collision.js";
 import { POWERUP, TANK, KEY_BINDINGS, BULLET, CELL_SIZE, SFX, PICKUP_RATE, MATCH_TARGET } from "../src/config.js";
@@ -448,6 +448,48 @@ section("可破坏墙 (destroyWallsInRadius)");
     let ok = true;
     try { destroyWallsInRadius(mz, S + 10, S * 0.5, 60); } catch { ok = false; }
     check("cells 为 null 不抛异常", ok && mz.walls.length === 2);
+  }
+  {
+    // destroyWallSegments 直接删除：cells 同步 + border 跳过
+    const mz = mkMaze();
+    const inner = mz.walls[2];
+    const outer = mz.walls[0];
+    const gone = destroyWallSegments(mz, [inner, outer]);
+    check("destroyWallSegments 删内墙跳过外墙",
+      gone.length === 1 && gone[0] === inner && mz.walls.length === 2 && mz.cells[0][1].left === false);
+  }
+}
+
+// ============================================================
+section("子弹磨墙 (bullet erode)");
+{
+  // 内墙竖在 x=100，子弹从左直射：每次反弹削 1 hp；erode=false 不削
+  const mkWalls = () => [{ x1: 100, y1: -200, x2: 100, y2: 200, border: false, hp: 3 }];
+  const shoot = (walls, erode) => {
+    // 从 x=40 向右直射，反弹后往回飞——重置位置速度打三轮
+    const b = new Bullet(40, 0, 200, 0, null);
+    for (let hits = 0; hits < 3; hits++) {
+      b.x = 40; b.y = 0; b.vx = 200; b.vy = 0;
+      for (let i = 0; i < 40; i++) b.update(1 / 60, walls, erode);
+    }
+    return b;
+  };
+
+  {
+    const walls = mkWalls();
+    shoot(walls, true);
+    check("三次撞击削 3 点耐久", walls[0].hp === 0, `hp=${walls[0].hp}`);
+  }
+  {
+    const walls = mkWalls();
+    shoot(walls, false);
+    check("erode=false 时耐久不动", walls[0].hp === 3, `hp=${walls[0].hp}`);
+  }
+  {
+    const walls = [{ x1: 100, y1: -200, x2: 100, y2: 200, border: true }];
+    let ok = true;
+    try { shoot(walls, true); } catch { ok = false; }
+    check("border 墙无 hp 字段免疫侵蚀", ok && walls[0].hp === undefined);
   }
 }
 

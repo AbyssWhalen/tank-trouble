@@ -20,7 +20,7 @@ import {
   POWERUP, PICKUP_RATE, MATCH_TARGET,
 } from "./config.js";
 import { Player } from "./player.js";
-import { generateMaze, destroyWallsInRadius } from "./maze.js";
+import { generateMaze, destroyWallsInRadius, destroyWallSegments } from "./maze.js";
 import { circleVsCircle, separateCircles, resolveCircleWalls, closestPointOnSegment } from "./collision.js";
 import { fitArena } from "./layout.js";
 import {
@@ -123,6 +123,7 @@ window.__devHook = {
   forceScores: (a, b) => { matchScores = [a, b]; },
   setTank: (i, patch) => { if (players[i]) Object.assign(players[i].tank, patch); },
   wallCount: () => (maze ? maze.walls.length : 0),
+  erodedCount: () => (maze ? maze.walls.filter((w) => !w.border && w.hp < WALL.hp).length : 0),
   blastAt: (x, y) => {
     // 直接触发一次炸墙结算（跳过地雷实体，专测破墙链路：几何/特效/音效/开关）
     if (!maze || !wallBreakEnabled) return 0;
@@ -451,9 +452,18 @@ function updatePlaying(dt) {
     }
   }
 
-  // 4) 子弹更新（移动 + 反弹）
+  // 4) 子弹更新（移动 + 反弹 + 磨墙）。开关开着时每次反弹削内墙 1 点耐久，
+  //    归零的墙这里统一删除（walls/cells 原子同步）——不在 bullet 遍历中删。
   for (const b of bullets) {
-    b.update(dt, maze.walls);
+    b.update(dt, maze.walls, wallBreakEnabled);
+  }
+  if (wallBreakEnabled) {
+    const crumbled = maze.walls.filter((w) => !w.border && w.hp <= 0);
+    if (crumbled.length) {
+      destroyWallSegments(maze, crumbled);
+      for (const w of crumbled) effects.push(new WallBreak(w.x1, w.y1, w.x2, w.y2));
+      playSfx("wallBreak");
+    }
   }
 
   // 5) 击中判定：每颗活子弹 vs 每个存活坦克
@@ -666,16 +676,18 @@ function renderArena() {
   ctx.fillStyle = THEME.arenaBg;
   ctx.fillRect(0, 0, arenaW, arenaH);
 
-  // 内墙
+  // 内墙：按剩余耐久渐淡（满血实线 → 残血 0.35，快碎的墙一眼可见）
   ctx.strokeStyle = WALL.color;
   ctx.lineWidth = WALL.thickness;
   ctx.lineCap = "round";
   for (const w of maze.walls) {
+    ctx.globalAlpha = w.border || w.hp === undefined ? 1 : 0.35 + 0.65 * Math.max(0, w.hp) / WALL.hp;
     ctx.beginPath();
     ctx.moveTo(w.x1, w.y1);
     ctx.lineTo(w.x2, w.y2);
     ctx.stroke();
   }
+  ctx.globalAlpha = 1;
 
   // 外框：沿竞技场四周叠一条更粗的边，框住整个场地（贴近原版醒目灰框）。
   // 外圈本就有物理墙（子弹靠它反弹），这里只是渲染层加粗，不改碰撞。

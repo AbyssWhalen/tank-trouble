@@ -18,7 +18,7 @@
 
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { generateMaze, destroyWallsInRadius } from "../src/maze.js";
+import { generateMaze, destroyWallsInRadius, destroyWallSegments } from "../src/maze.js";
 import { Tank } from "../src/tank.js";
 import { PowerupSpawner } from "../src/powerup.js";
 import { castLaserPath } from "../src/laser.js";
@@ -175,8 +175,12 @@ function playRound(sideAFirst) {
       if (mine) mines.push(mine);
     }
 
-    // 4) 子弹运动 + 5) 击中判定
-    for (const b of bullets) b.update(dt, maze.walls);
+    // 4) 子弹运动（含磨墙）+ 5) 击中判定
+    for (const b of bullets) b.update(dt, maze.walls, true);
+    {
+      const crumbled = maze.walls.filter((w) => !w.border && w.hp <= 0);
+      if (crumbled.length) destroyWallSegments(maze, crumbled);
+    }
     for (const b of bullets) {
       if (b.dead) continue;
       for (const p of players) {

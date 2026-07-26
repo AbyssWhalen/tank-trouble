@@ -15,7 +15,7 @@
 // 每个格用四面墙的开关表示：top/right/bottom/left。相邻两格共享一堵墙。
 // ============================================================
 
-import { CELL_SIZE, WALL_DENSITY } from "./config.js";
+import { CELL_SIZE, WALL_DENSITY, WALL } from "./config.js";
 import { closestPointOnSegment } from "./collision.js";
 
 // 四方向表：格间邻接 + 对应墙面名。maze 自用（泛洪/敲墙），ai.js 寻路也复用。
@@ -89,14 +89,22 @@ export function knockWall(cells, c, r, d) {
 // 注意：此函数整体替换 maze.walls 数组（filter 换新），必须在墙遍历之外调用
 // （地雷结算处满足）；smoke 夹具 cells 可为 null，此时跳过 cells 同步。
 export function destroyWallsInRadius(maze, cx, cy, radius) {
+  const hit = maze.walls.filter((w) => {
+    if (w.border) return false;
+    const cp = closestPointOnSegment(cx, cy, w.x1, w.y1, w.x2, w.y2);
+    return Math.hypot(cx - cp.x, cy - cp.y) < radius;
+  });
+  return destroyWallSegments(maze, hit);
+}
+
+// 删除指定内墙段集合（炸墙/子弹磨穿共用的删除口）：
+// 标记 destroyed + cells 同步 + walls 数组 filter 换新。border 段直接跳过。
+export function destroyWallSegments(maze, segs) {
   const S = maze.cellSize || CELL_SIZE;
   const destroyed = [];
 
-  for (const w of maze.walls) {
-    if (w.border) continue;
-    const cp = closestPointOnSegment(cx, cy, w.x1, w.y1, w.x2, w.y2);
-    if (Math.hypot(cx - cp.x, cy - cp.y) >= radius) continue;
-
+  for (const w of segs) {
+    if (w.border || w.destroyed) continue;
     w.destroyed = true;
     destroyed.push(w);
 
@@ -180,10 +188,15 @@ function buildWallSegments(cells, cols, rows) {
       const x = c * S;
       const y = r * S;
 
+      // 内墙带耐久 hp（子弹撞击侵蚀，归零碎掉）；外墙无 hp 字段（不可破坏）
       if (cell.top)
-        segs.push({ x1: x, y1: y, x2: x + S, y2: y, border: r === 0 });
+        segs.push(r === 0
+          ? { x1: x, y1: y, x2: x + S, y2: y, border: true }
+          : { x1: x, y1: y, x2: x + S, y2: y, border: false, hp: WALL.hp });
       if (cell.left)
-        segs.push({ x1: x, y1: y, x2: x, y2: y + S, border: c === 0 });
+        segs.push(c === 0
+          ? { x1: x, y1: y, x2: x, y2: y + S, border: true }
+          : { x1: x, y1: y, x2: x, y2: y + S, border: false, hp: WALL.hp });
       if (c === cols - 1 && cell.right)
         segs.push({ x1: x + S, y1: y, x2: x + S, y2: y + S, border: true });
       if (r === rows - 1 && cell.bottom)

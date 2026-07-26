@@ -24,8 +24,10 @@ export class Bullet {
     this.trail = [];     // 最近几帧的位置（拖尾渲染用，反弹处自然拐弯）
   }
 
-  // dt: 距上一帧秒数；walls: 墙线段数组
-  update(dt, walls) {
+  // dt: 距上一帧秒数；walls: 墙线段数组；
+  // erode: 撞击内墙时削其耐久（wall.hp--，阶段 18 子弹磨墙）——只削血不删墙，
+  //   归零墙的删除由 main 帧末统一做（遍历中改字段安全、删元素危险）
+  update(dt, walls, erode = false) {
     if (this.dead) return;
 
     this.age += dt;
@@ -57,7 +59,9 @@ export class Bullet {
           const r = reflect(this.vx, this.vy, hit.nx, hit.ny);
           this.vx = r.vx;
           this.vy = r.vy;
-          // 3) 计反弹次数，超限消亡
+          // 3) 磨墙：内墙被撞掉 1 点耐久（外墙无 hp 字段天然免疫）
+          if (erode && !w.border && w.hp !== undefined) w.hp--;
+          // 4) 计反弹次数，超限消亡
           this.bounces++;
           if (this.bounces > BULLET.maxBounces) {
             this.dead = true;
