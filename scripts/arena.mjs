@@ -16,6 +16,7 @@
 // （git show 旧版本后用 sed 替换，见 CLAUDE.md）。
 // ============================================================
 
+// 注：开场倒计时/击杀慢动作/战绩统计为表现层（main.js），arena 不复刻。
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { generateMaze, destroyWallsInRadius, destroyWallSegments } from "../src/maze.js";

@@ -107,6 +107,20 @@ export const ROUND_RESTART_DELAY = 1.5;
 // 同归于尽不加分，所以整场时长有自然上限但无固定局数。
 export const MATCH_TARGET = 5;
 
+// 回合开场倒计时（3-2-1-GO）：倒计时期间双方全冻结——包括跳过 AI 的
+// getControls（否则 AI 开火冷却在玩家不能动时被烧掉，GO 瞬间枪已就绪=抢先手）。
+export const ROUND_INTRO = {
+  beat: 0.7,   // 每拍时长（秒）：3/2/1 各一拍，总冻结 2.1s
+  goHold: 0.5, // "GO!" 余像显示时长（此时已解冻，纯视觉）
+};
+
+// 击杀慢动作：终杀瞬间时间放慢（1v1 任何击杀都终结回合，直接挂在击杀点）。
+// duration 按真实秒计（自身衰减用真实 dt，否则慢动作把自己也拖慢 1/scale 倍）。
+export const SLOWMO = {
+  scale: 0.35,    // 游戏时间倍率
+  duration: 0.55, // 持续真实秒：覆盖爆炸碎片飞散最精彩的前半段
+};
+
 // 坦克被击破的爆炸效果（参考原版：深色烟团 + 浅色碎片四散）。
 // 时长须 < ROUND_RESTART_DELAY，保证结算横幅期间能播完整段动画。
 // 联机 v2 同款复用：死亡有视觉反馈而不是凭空消失。
@@ -342,6 +356,9 @@ export const SFX = {
   // UI：菜单/暂停点击轻 tick；改键冲突/保留键低沉 buzz
   uiClick: [{ type: "tone", wave: "triangle", freq: [700, 700], dur: 0.045, gain: 0.1 }],
   uiError: [{ type: "tone", wave: "square", freq: [220, 180], dur: 0.18, gain: 0.13 }],
+  // 开场倒计时：每拍短 tick；GO 上扬双音（解冻信号）
+  countTick: [{ type: "tone", wave: "triangle", freq: [880, 880], dur: 0.08, gain: 0.18 }],
+  countGo: [{ type: "tone", wave: "triangle", freq: [988, 1319], dur: 0.18, gain: 0.25 }],
 };
 
 // 拾取音的道具变调（playbackRate 式整体倍率）：攻击性越强音越高，

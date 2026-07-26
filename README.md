@@ -28,6 +28,7 @@ Local multiplayer tank combat game with procedural maze generation, bullet ricoc
 - ✨ **手感特效** | Screen shake, muzzle flash, bullet trails & explosions
 - 🔊 **程序合成音效·零素材文件** | Procedurally synthesized SFX (Web Audio, zero asset files), mute toggle persisted
 - 🎯 **局胜制·先到 5 分赢下整场** | First to 5 rounds wins the match
+- ⏱️ **开场倒计时 + 击杀慢动作 + 战绩统计** | Round countdown, kill slow-mo & persistent stats
 - 📟 **HUD 武器状态指示** | On-HUD weapon & shield badges with ammo counts
 - 📐 **自适应窗口** | Responsive viewport scaling
 
@@ -149,6 +150,7 @@ Zero runtime dependencies, pure frontend implementation.
 - **阶段 17**：可破坏内墙——地雷爆炸炸碎波及圈内墙（外墙不破），地形随战斗演变；菜单「地形」开关
 - **阶段 18**：子弹磨墙——内墙带耐久，子弹逐发侵蚀（墙渐淡示血量）归零碎掉；破坏从此每回合可见
 - **阶段 19**：主菜单瘦身——难度/道具/地形/音效与键位入口全部收进 ⚙ 设置浮层，首屏只留模式选择
+- **阶段 20**：表现层打磨——开场 3-2-1-GO 倒计时（冻结双方，修 AI 抢先手）+ 击杀慢动作 + 战绩统计（命中率/最爱武器/连胜，本地持久化）
 
 ---
 

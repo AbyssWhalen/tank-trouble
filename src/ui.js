@@ -21,7 +21,7 @@ const buttons = [
 ];
 
 // —— 设置浮层面板（阶段 19：难度/道具/地形/音效 chip 与键位入口全收于此）——
-const SETTINGS_PANEL = { w: 560, h: 410 };
+const SETTINGS_PANEL = { w: 560, h: 490 };
 SETTINGS_PANEL.x = (CANVAS.width - SETTINGS_PANEL.w) / 2;
 SETTINGS_PANEL.y = (CANVAS.height - SETTINGS_PANEL.h) / 2;
 
@@ -478,10 +478,39 @@ export function renderSettingsOverlay(ctx, view) {
     ctx.fillText("键位设置…", b.x + b.w / 2, b.y + b.h / 2);
   }
 
+  // 战绩统计（P1 视角，终身累计；两列小字）
+  if (view.stats) {
+    const s = view.stats;
+    const sy = settingsRebindBtn.y + settingsRebindBtn.h + 34;
+    ctx.fillStyle = THEME.textDim;
+    ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
+    const acc = s.kills > 0 || s.accuracy > 0 ? `${Math.round(s.accuracy * 100)}%` : "—";
+    const fav = s.favorite ?? "—";
+    ctx.fillText(`战绩　击杀 ${s.kills} · 命中率 ${acc} · 最爱 ${fav} · 最长连胜 ${s.bestStreak}`, cx, sy);
+  }
+
   // 底部提示
   ctx.fillStyle = THEME.textDim;
   ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
   ctx.fillText("点击面板外或按 Esc 关闭", cx, p.y + p.h - 26);
+}
+
+// 回合开场倒计时：3/2/1 大数字，0 = "GO!"。叠加在场地上层。
+export function renderCountdown(ctx, n) {
+  const cx = CANVAS.width / 2;
+  const cy = CANVAS.height / 2;
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  // 白描边 + 主题色字，深浅场地上都清晰
+  ctx.font = "bold 96px system-ui, 'Microsoft YaHei', sans-serif";
+  const text = n > 0 ? String(n) : "GO!";
+  ctx.lineWidth = 8;
+  ctx.strokeStyle = "rgba(255,255,255,0.85)";
+  ctx.strokeText(text, cx, cy);
+  ctx.fillStyle = n > 0 ? THEME.accent : "#2e9e46"; // GO 用绿色（解冻信号）
+  ctx.fillText(text, cx, cy);
+  ctx.restore();
 }
 
 // 键位设置面板。view = { mouse, capturing: {player, action}|null, conflictMsg }
@@ -832,7 +861,7 @@ export function renderRoundOverBanner(ctx, { winner, secondsLeft }) {
 
 // 整场结算大横幅（先到 MATCH_TARGET 分）。view = { winner, matchScores, players, mouse }
 // 与回合横幅的区别：无自动倒计时（等玩家选择）、显示大比分、带按钮。
-export function renderMatchOverBanner(ctx, { winner, matchScores, players, mouse }) {
+export function renderMatchOverBanner(ctx, { winner, matchScores, players, mouse, matchAccuracy }) {
   const cx = CANVAS.width / 2;
   const { x: mx, y: my } = mouse;
 
@@ -860,6 +889,15 @@ export function renderMatchOverBanner(ctx, { winner, matchScores, players, mouse
   ctx.fillText(":", cx, 344);
   ctx.fillStyle = players[1].color;
   ctx.fillText(String(matchScores[1]), cx + 56, 348);
+
+  // 本场命中率（双方都开过火才显示）
+  const acc = matchAccuracy;
+  if (acc && (acc[0] !== null || acc[1] !== null)) {
+    const fmt = (a) => (a === null ? "—" : `${Math.round(a * 100)}%`);
+    ctx.fillStyle = THEME.textDim;
+    ctx.font = "15px system-ui, 'Microsoft YaHei', sans-serif";
+    ctx.fillText(`本场命中率　${players[0].label} ${fmt(acc[0])} · ${players[1].label} ${fmt(acc[1])}`, cx, 398);
+  }
 
   // 按钮（白底 hover 主题色，同暂停浮层风格）
   for (const b of matchOverButtons) {

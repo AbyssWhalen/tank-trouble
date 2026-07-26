@@ -501,9 +501,10 @@ section("音效 spec 表 (SFX/PICKUP_RATE)");
   const expected = [
     "shoot", "shootScatter", "laser", "kill", "shieldBreak", "pickup",
     "mineDeploy", "mineBlast", "wallBreak", "roundWin", "matchWin", "roundDraw", "uiClick", "uiError",
+    "countTick", "countGo",
   ];
   const names = Object.keys(SFX);
-  check("14 个事件名双向齐全",
+  check("16 个事件名双向齐全",
     expected.every((n) => names.includes(n)) && names.every((n) => expected.includes(n)),
     `实有 ${names.length} 个`);
 
@@ -540,6 +541,42 @@ section("音效 spec 表 (SFX/PICKUP_RATE)");
 
   check("MATCH_TARGET 是合理的局胜分",
     Number.isInteger(MATCH_TARGET) && MATCH_TARGET >= 2 && MATCH_TARGET <= 20, `= ${MATCH_TARGET}`);
+}
+
+// ============================================================
+section("战绩统计 (stats 纯函数)");
+{
+  const { normalizeStats, accuracy, favoriteWeapon, updateStreak } = await import("../src/stats.js");
+
+  {
+    const s = normalizeStats(null);
+    check("空档落默认（双玩家零值）",
+      s.players.length === 2 && s.players[0].fired === 0 && s.players[1].kills.laser === 0
+      && s.bestStreak === 0 && s.curStreak === 0);
+  }
+  {
+    const s = normalizeStats({ players: [{ fired: "bad", hits: -3, kills: { laser: 7 } }], bestStreak: 4.0 });
+    check("坏字段各自落默认、好字段保留",
+      s.players[0].fired === 0 && s.players[0].hits === 0 && s.players[0].kills.laser === 7
+      && s.bestStreak === 4 && s.players[1].fired === 0);
+  }
+  {
+    check("命中率除零保护", accuracy({ fired: 0, hits: 0 }) === 0);
+    check("命中率正常与钳位", accuracy({ fired: 10, hits: 4 }) === 0.4 && accuracy({ fired: 2, hits: 5 }) === 1);
+  }
+  {
+    const none = favoriteWeapon({ kills: { bullet: 0, scatter: 0, laser: 0, mine: 0 } });
+    const laser = favoriteWeapon({ kills: { bullet: 2, scatter: 0, laser: 5, mine: 1 } });
+    check("最爱武器 argmax（全零 null）", none === null && laser === "激光");
+  }
+  {
+    let s = updateStreak(2, 3, 0);
+    check("P1 赢连胜 +1 并刷新纪录", s.curStreak === 3 && s.bestStreak === 3);
+    s = updateStreak(3, 5, 1);
+    check("P1 输连胜清零纪录保留", s.curStreak === 0 && s.bestStreak === 5);
+    s = updateStreak(2, 5, null);
+    check("同归于尽连胜不动", s.curStreak === 2 && s.bestStreak === 5);
+  }
 }
 
 // ============================================================

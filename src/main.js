@@ -17,7 +17,7 @@
 import {
   CANVAS, PLAYER_COLORS, KEY_BINDINGS, MAZE_TIERS, TIER_POOL_BY_MODE,
   WALL, CELL_SIZE, BULLET, TANK, THEME, ROUND_RESTART_DELAY,
-  POWERUP, PICKUP_RATE, MATCH_TARGET,
+  POWERUP, PICKUP_RATE, MATCH_TARGET, ROUND_INTRO, SLOWMO,
 } from "./config.js";
 import { Player } from "./player.js";
 import { generateMaze, destroyWallsInRadius, destroyWallSegments } from "./maze.js";
@@ -35,7 +35,7 @@ import {
 } from "./input.js";
 import {
   renderMenu, renderPauseOverlay, renderHud, renderRoundOverBanner,
-  renderMatchOverBanner, renderRebindOverlay, renderSettingsOverlay,
+  renderMatchOverBanner, renderRebindOverlay, renderSettingsOverlay, renderCountdown,
   menuAction, pauseAction, rebindAction, settingsAction, matchOverAction, keyLabel,
 } from "./ui.js";
 import {
@@ -45,6 +45,10 @@ import {
   loadWallBreak, saveWallBreak,
 } from "./settings.js";
 import { initAudio, playSfx, toggleMuted, isMuted } from "./audio.js";
+import {
+  loadStats, saveStats, getStats, accuracy, favoriteWeapon,
+  recordFired, recordHit, recordKill, recordRoundEnd, recordMatchWin,
+} from "./stats.js";
 
 const canvas = document.getElementById("game-canvas");
 const ctx = canvas.getContext("2d");
@@ -81,6 +85,9 @@ initSettings();
 // 音效：读静音存档 + 挂手势解锁监听（Chromium autoplay policy）
 initAudio(loadAudioMuted() ?? false);
 
+// 战绩统计：读历史存档进内存（落盘时机在回合/整场结算处）
+loadStats();
+
 // —— 游戏状态机 ——
 const STATE = { MENU: "menu", PLAYING: "playing", PAUSED: "paused", ROUND_OVER: "round_over", MATCH_OVER: "match_over" };
 let state = STATE.MENU;
@@ -103,6 +110,10 @@ let currentMode = "pvp";       // 当前对局模式，R 重开时复用
 // 所以提到这里按玩家 index 存。开新整场(startMatch)才清零，回合重开不碰。
 let matchScores = [0, 0];      // 各玩家累计胜场，index 对齐 players
 let roundOverTimer = 0;        // ROUND_OVER 倒计时（秒），归零自动重开
+let matchStatsBase = null;     // 本场统计基线（startMatch 快照，横幅显示本场命中率用）
+let introTimer = 0;            // 回合开场倒计时（秒）：>0 时双方全冻结（含 AI 决策）
+let goTimer = 0;               // "GO!" 余像计时（解冻后纯视觉）
+let slowmoTimer = 0;           // 击杀慢动作剩余（真实秒）：>0 时游戏 dt × SLOWMO.scale
 let aiLevel = "normal";        // 选中的 AI 难度档（菜单 chip 单选），开局/R 重开沿用
 // 启用的道具类型集合（菜单多选 chip；空集=整局无道具）。
 // 初始从 localStorage 读上次组合，没存过默认全启;变化即写盘。
@@ -126,6 +137,10 @@ window.__devHook = {
   setTank: (i, patch) => { if (players[i]) Object.assign(players[i].tank, patch); },
   wallCount: () => (maze ? maze.walls.length : 0),
   erodedCount: () => (maze ? maze.walls.filter((w) => !w.border && w.hp < WALL.hp).length : 0),
+  skipCountdown: () => { introTimer = 0; },
+  introLeft: () => introTimer,
+  slowmoLeft: () => slowmoTimer,
+  statsSnapshot: () => JSON.parse(JSON.stringify(getStats())),
   blastAt: (x, y) => {
     // 直接触发一次炸墙结算（跳过地雷实体，专测破墙链路：几何/特效/音效/开关）
     if (!maze || !wallBreakEnabled) return 0;
@@ -141,6 +156,9 @@ window.__devHook = {
 // setupRound 只负责「单回合」级状态(地图/玩家)。回合重开只走 setupRound，分数不动。
 function startMatch(mode) {
   matchScores = [0, 0];
+  // 本场命中率基线：整场结算横幅显示的是「本场」而非终身累计，
+  // 记开场时的 fired/hits，MATCH_OVER 处做差
+  matchStatsBase = getStats().players.map((p) => ({ fired: p.fired, hits: p.hits }));
   setupRound(mode);
 }
 
@@ -185,6 +203,9 @@ function setupRound(mode) {
   // 全没启用则传空数组，整局永不刷（spawner 内部 types 为空直接 return）
   spawner = new PowerupSpawner(POWERUP.types.filter((t) => enabledPowerups.has(t)));
   winner = null;
+  introTimer = ROUND_INTRO.beat * 3; // 3-2-1 三拍冻结开场
+  goTimer = 0;
+  playSfx("countTick"); // 第一拍「3」（后续换拍音在 updatePlaying 的门里）
   state = STATE.PLAYING;
 }
 
@@ -193,7 +214,12 @@ let lastTime = 0;
 function loop(now) {
   const dt = lastTime ? Math.min((now - lastTime) / 1000, 0.05) : 0;
   lastTime = now;
-  update(dt);
+  // 击杀慢动作：游戏时间缩放；slowmo 自身与 GO 余像用真实 dt 衰减
+  // （若用缩放后 dt 衰减，慢动作会把自己拖慢 1/scale 倍）
+  const gameDt = slowmoTimer > 0 ? dt * SLOWMO.scale : dt;
+  slowmoTimer = Math.max(0, slowmoTimer - dt);
+  goTimer = Math.max(0, goTimer - dt);
+  update(gameDt);
   render();
   requestAnimationFrame(loop);
 }
@@ -378,6 +404,23 @@ function updatePlaying(dt) {
     return;
   }
 
+  // 0.5) 开场倒计时门：3-2-1 期间双方全冻结——必须跳过 getControls 整段，
+  //      否则 AI 的开火冷却在玩家不能动时被烧掉，GO 瞬间枪已就绪（抢先手）。
+  //      特效照常推进（出生无特效，此处是习惯性保守），Esc 暂停仍可用（上面已处理）。
+  if (introTimer > 0) {
+    const beatBefore = Math.ceil(introTimer / ROUND_INTRO.beat);
+    introTimer = Math.max(0, introTimer - dt); // 钳 0：负值残留会让 devHook/渲染判定歧义
+    const beatAfter = Math.ceil(introTimer / ROUND_INTRO.beat);
+    if (introTimer === 0) {
+      goTimer = ROUND_INTRO.goHold; // 解冻，"GO!" 余像
+      playSfx("countGo");
+    } else if (beatAfter < beatBefore) {
+      playSfx("countTick"); // 换拍（3→2→1）
+    }
+    updateEffects(dt);
+    return;
+  }
+
   // 1) 收集本帧所有玩家的控制指令（人读键盘 / AI 决策），与执行分离——
   //    保持"先全员移动、再全员开火"的原有顺序，也让 AI 看到的是同一帧的世界
   const world = { maze, players, bullets, powerups, mines };
@@ -453,10 +496,13 @@ function updatePlaying(dt) {
         p.tank.shieldTimer = 0;
         effects.push(new ShieldBreak(p.tank.x, p.tank.y, THEME.shieldRing));
         playSfx("shieldBreak");
+        if (m.owner !== p.tank) recordHit(players.findIndex(pp => pp.tank === m.owner));
       } else {
         p.tank.alive = false;
         effects.push(new TankExplosion(p.tank.x, p.tank.y, p.color));
         playSfx("kill");
+        slowmoTimer = SLOWMO.duration; // 1v1 任何击杀=终杀，慢镜
+        if (m.owner !== p.tank) recordKill(players.findIndex(pp => pp.tank === m.owner), "mine");
       }
     }
   }
@@ -470,9 +516,16 @@ function updatePlaying(dt) {
     if (res.bullets.length > 0) {
       effects.push(new MuzzleFlash(res.bullets[0].x, res.bullets[0].y, players[i].tank.angle));
       playSfx(res.bullets.length > 1 ? "shootScatter" : "shoot"); // 散射一炮一个音
+      recordFired(i, res.bullets.length); // 命中率分母按实际弹数（散射 3 发计 3）
     }
-    for (const b of res.bullets) bullets.push(b);
-    if (res.laser) fireLaser(res.laser);
+    for (const b of res.bullets) {
+      b.kind = res.bullets.length > 1 ? "scatter" : "bullet"; // 统计击杀归类用
+      bullets.push(b);
+    }
+    if (res.laser) {
+      recordFired(i, 1);
+      fireLaser(res.laser, players[i]); // 补传射手，击杀归属统计
+    }
 
     const mine = players[i].tank.tryDeploy(controls[i].special, maze.walls);
     if (mine) {
@@ -511,6 +564,7 @@ function updatePlaying(dt) {
           effects.push(new ShieldBreak(p.tank.x, p.tank.y, THEME.shieldRing));
           addShake(3, 0.2);
           playSfx("shieldBreak");
+          if (b.owner !== p.tank) recordHit(players.findIndex(pp => pp.tank === b.owner));
         } else {
           b.dead = true;
           p.tank.alive = false;
@@ -518,6 +572,8 @@ function updatePlaying(dt) {
           effects.push(new TankExplosion(p.tank.x, p.tank.y, p.color));
           addShake(5, 0.3);
           playSfx("kill");
+          slowmoTimer = SLOWMO.duration;
+          if (b.owner !== p.tank) recordKill(players.findIndex(pp => pp.tank === b.owner), b.kind || "bullet");
         }
         break; // 一颗子弹只打一个
       }
@@ -536,11 +592,15 @@ function updatePlaying(dt) {
     // 计分：转 ROUND_OVER 这一帧加一次（同归于尽 winner=null 不加分）。
     // 状态切走后不再进 updatePlaying，天然只触发一次，无需额外加锁。
     if (winner) matchScores[winner.index]++;
+    recordRoundEnd(winner ? winner.index : null); // 胜场 + P1 连胜推进
     if (winner && matchScores[winner.index] >= MATCH_TARGET) {
       // 先到局胜分：整场结束，大横幅等玩家选择（无自动倒计时）
+      recordMatchWin(winner.index);
+      saveStats();
       state = STATE.MATCH_OVER;
       playSfx("matchWin");
     } else {
+      saveStats(); // 回合级也落盘，防中途退出丢统计（每回合一次全量写可接受）
       roundOverTimer = ROUND_RESTART_DELAY; // 启动自动重开倒计时
       state = STATE.ROUND_OVER;
       playSfx(winner ? "roundWin" : "roundDraw"); // 状态切走后不再进本函数，天然只播一次
@@ -553,7 +613,7 @@ function updatePlaying(dt) {
 // 挡住射线，无盾即死）→ 路径截断到命中点（视觉上射线止于目标/护盾）。
 // origin = tank.muzzlePoint()；首段起点在炮口外、朝前发射，几何上不会
 // 打中发射者自己；反弹段扫回来则可以自杀——与子弹跳弹手感一致。
-function fireLaser(origin) {
+function fireLaser(origin, shooter = null) {
   let pts = castLaserPath(origin.x, origin.y, origin.angle, maze.walls);
 
   for (let i = 0; i < pts.length - 1; i++) {
@@ -584,11 +644,14 @@ function fireLaser(origin) {
         effects.push(new ShieldBreak(tank.x, tank.y, THEME.shieldRing));
         addShake(3, 0.2);
         playSfx("shieldBreak");
+        if (shooter && shooter !== hit.p) recordHit(shooter.index);
       } else {
         tank.alive = false;
         effects.push(new TankExplosion(tank.x, tank.y, hit.p.color));
         addShake(5, 0.3);
         playSfx("kill");
+        slowmoTimer = SLOWMO.duration;
+        if (shooter && shooter !== hit.p) recordKill(shooter.index, "laser");
       }
       break;
     }
@@ -670,6 +733,15 @@ function render() {
           enabledPowerups,
           wallBreakEnabled,
           muted: isMuted(),
+          stats: (() => {
+            const p1 = getStats().players[0];
+            return {
+              kills: Object.values(p1.kills).reduce((a, b) => a + b, 0),
+              accuracy: accuracy(p1),
+              favorite: favoriteWeapon(p1),
+              bestStreak: getStats().bestStreak,
+            };
+          })(),
         });
       }
       if (rebind.open) {
@@ -682,6 +754,9 @@ function render() {
       break;
     case STATE.PLAYING:
       renderArena();
+      // 开场倒计时大数字 / GO 余像（叠在场地上，HUD 之上）
+      if (introTimer > 0) renderCountdown(ctx, Math.ceil(introTimer / ROUND_INTRO.beat));
+      else if (goTimer > 0) renderCountdown(ctx, 0); // 0 = "GO!"
       break;
     case STATE.PAUSED:
       renderArena();
@@ -693,7 +768,16 @@ function render() {
       break;
     case STATE.MATCH_OVER:
       renderArena();
-      renderMatchOverBanner(ctx, { winner, matchScores, players, mouse: getMousePos() });
+      renderMatchOverBanner(ctx, {
+        winner, matchScores, players, mouse: getMousePos(),
+        // 本场命中率（对基线做差；无基线或没开过火显示跳过）
+        matchAccuracy: matchStatsBase
+          ? getStats().players.map((p, i) => {
+              const fired = p.fired - matchStatsBase[i].fired;
+              return fired > 0 ? (p.hits - matchStatsBase[i].hits) / fired : null;
+            })
+          : [null, null],
+      });
       break;
   }
 }
