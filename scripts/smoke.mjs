@@ -15,7 +15,7 @@ import { castLaserPath } from "../src/laser.js";
 import { generateMaze, destroyWallsInRadius, destroyWallSegments } from "../src/maze.js";
 import { AiController, findBounceShot } from "../src/ai.js";
 import { closestPointOnSegment } from "../src/collision.js";
-import { POWERUP, TANK, KEY_BINDINGS, BULLET, CELL_SIZE, SFX, PICKUP_RATE, MATCH_TARGET } from "../src/config.js";
+import { POWERUP, TANK, KEY_BINDINGS, BULLET, CELL_SIZE, SFX, PICKUP_RATE, MATCH_TARGET, MAZE_TIERS, MAZE_STYLES, WALL } from "../src/config.js";
 
 let pass = 0;
 let fail = 0;
@@ -541,6 +541,94 @@ section("音效 spec 表 (SFX/PICKUP_RATE)");
 
   check("MATCH_TARGET 是合理的局胜分",
     Number.isInteger(MATCH_TARGET) && MATCH_TARGET >= 2 && MATCH_TARGET <= 20, `= ${MATCH_TARGET}`);
+}
+
+// ============================================================
+section("地图生成 (generateMaze 三风格)");
+{
+  // 每 tier × style 生成 30 张，验证结构不变量（不测美感，只测契约）
+  const bfs = (cells, cols, rows) => {
+    // 与 maze.floodReachable 同逻辑，独立重写防实现耦合
+    const seen = Array.from({ length: rows }, () => new Array(cols).fill(false));
+    const D = [{ dc: 0, dr: -1, w: "top" }, { dc: 1, dr: 0, w: "right" }, { dc: 0, dr: 1, w: "bottom" }, { dc: -1, dr: 0, w: "left" }];
+    const stack = [{ c: 0, r: 0 }];
+    seen[0][0] = true;
+    let n = 1;
+    while (stack.length) {
+      const { c, r } = stack.pop();
+      for (const d of D) {
+        const nc = c + d.dc, nr = r + d.dr;
+        if (nc < 0 || nc >= cols || nr < 0 || nr >= rows || seen[nr][nc]) continue;
+        if (cells[r][c][d.w]) continue;
+        seen[nr][nc] = true; n++;
+        stack.push({ c: nc, r: nr });
+      }
+    }
+    return { n, seen };
+  };
+
+  for (const style of Object.keys(MAZE_STYLES)) {
+    let allOk = true;
+    let detail = "";
+    outer:
+    for (const [tier, { cols, rows }] of Object.entries(MAZE_TIERS)) {
+      for (let trial = 0; trial < 30; trial++) {
+        const mz = generateMaze(cols, rows, style);
+        const { cells, walls } = mz;
+
+        // 1) cells 双向一致（最核心不变量，共享墙两面必须同值）
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols - 1; c++) {
+            if (cells[r][c].right !== cells[r][c + 1].left) { allOk = false; detail = `${tier} 竖边双向不一致`; break outer; }
+          }
+        }
+        for (let r = 0; r < rows - 1; r++) {
+          for (let c = 0; c < cols; c++) {
+            if (cells[r][c].bottom !== cells[r + 1][c].top) { allOk = false; detail = `${tier} 横边双向不一致`; break outer; }
+          }
+        }
+
+        // 2) 全图连通 + 出生点互达
+        const { n, seen } = bfs(cells, cols, rows);
+        if (n !== cols * rows) { allOk = false; detail = `${tier} 不连通 ${n}/${cols * rows}`; break outer; }
+        if (!seen[rows - 1][cols - 1]) { allOk = false; detail = `${tier} 出生点不互达`; break outer; }
+
+        // 3) 外边界完整（border 段数 = 周长格边数）
+        const borders = walls.filter((w) => w.border).length;
+        if (borders !== 2 * (cols + rows)) { allOk = false; detail = `${tier} 外边界 ${borders}≠${2 * (cols + rows)}`; break outer; }
+
+        // 4) hp 继承 + 内墙段方向不变量（保护 destroyWallSegments 反解）
+        for (const w of walls) {
+          if (w.border && w.hp !== undefined) { allOk = false; detail = "外墙带 hp"; break outer; }
+          if (!w.border) {
+            if (w.hp !== WALL.hp) { allOk = false; detail = "内墙 hp 缺失"; break outer; }
+            const horizontal = w.y1 === w.y2;
+            const c = Math.round(w.x1 / CELL_SIZE), r = Math.round(w.y1 / CELL_SIZE);
+            if (horizontal ? r <= 0 : c <= 0) { allOk = false; detail = "内墙段落在外圈坐标"; break outer; }
+          }
+        }
+
+        // 5) 密度区间（内墙数/内部边总数）
+        const innerEdges = rows * (cols - 1) + cols * (rows - 1);
+        const innerWalls = walls.filter((w) => !w.border).length;
+        const density = innerWalls / innerEdges;
+        if (density < 0.05 || density > 0.65) { allOk = false; detail = `${tier} 密度 ${density.toFixed(2)} 出界`; break outer; }
+
+        // 6) symmetric 专项：四面镜像
+        if (style === "symmetric") {
+          for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+              const m = cells[rows - 1 - r][cols - 1 - c];
+              if (cells[r][c].top !== m.bottom || cells[r][c].left !== m.right) {
+                allOk = false; detail = `${tier} (${c},${r}) 不对称`; break outer;
+              }
+            }
+          }
+        }
+      }
+    }
+    check(`${style} 风格 3 档 × 30 张结构不变量全过`, allOk, detail);
+  }
 }
 
 // ============================================================

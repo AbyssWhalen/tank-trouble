@@ -39,6 +39,23 @@ export const TIER_POOL_BY_MODE = {
 // 越小越空旷、越适合追逐跳弹；越大越接近走迷宫。0.25~0.35 比较像原版。
 export const WALL_DENSITY = 0.28;
 
+// 地图风格（阶段 21）：每回合从池里随机抽一种，与 tier 抽取正交。
+//   sparse    经典稀疏格栅（原版风）
+//   symmetric 180° 中心对称竞技场——两侧地形镜像，绝对公平；
+//             现有出生点（左上/右下角）恰好互为中心对称，天然配合
+//   rooms     房间+走廊——简化 BSP 递归二分，切缝放墙 + 相邻房间开门
+export const MAZE_STYLES = {
+  sparse:    { label: "稀疏格栅", density: 0.28 },
+  symmetric: { label: "对称竞技场", density: 0.30 },
+  rooms:     { label: "房间走廊", roomMin: 2, roomMax: 3, extraDoorChance: 0.5 },
+};
+export const STYLE_POOL_BY_MODE = {
+  pvp: ["sparse", "symmetric", "rooms"],
+  pve: ["sparse", "symmetric", "rooms"],
+  "3p": ["sparse"], // v2 预留保守，先只用经典风格
+  "4p": ["sparse"],
+};
+
 // 坦克参数
 // 外观模仿 Tank Trouble 原版：俯视角，上下两条履带夹着车体，中央圆炮塔伸出圆头炮管。
 // 坐标约定：车体朝向 +x（炮管指向右），渲染时已 rotate 到 angle。

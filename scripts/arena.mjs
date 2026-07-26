@@ -27,7 +27,7 @@ import {
   circleVsCircle, separateCircles, resolveCircleWalls, closestPointOnSegment,
 } from "../src/collision.js";
 import {
-  CELL_SIZE, TANK, BULLET, POWERUP, MAZE_TIERS, TIER_POOL_BY_MODE,
+  CELL_SIZE, TANK, BULLET, POWERUP, MAZE_TIERS, TIER_POOL_BY_MODE, STYLE_POOL_BY_MODE,
 } from "../src/config.js";
 
 // —— 参数解析（--key value 形式，全部可选）——
@@ -42,6 +42,8 @@ const LEVEL_B = opt.levelB ?? opt.level ?? "normal";
 const TIMEOUT = Number(opt.timeout ?? 90); // 单回合模拟时长上限（秒），到点判超时
 const TYPES = opt.powerups === "none" ? []
   : (opt.powerups ? opt.powerups.split(",") : [...POWERUP.types]);
+// 地图风格：--style sparse|symmetric|rooms|all（all=每回合从 pve 池随机，同实机）
+const STYLE = opt.style ?? "sparse";
 
 // AI 模块可替换（新旧对比的关键）：默认双方都用当前仓库版
 async function loadAi(p) {
@@ -57,7 +59,10 @@ function playRound(sideAFirst) {
   const pool = TIER_POOL_BY_MODE.pve;
   const tier = pool[Math.floor(Math.random() * pool.length)];
   const { cols, rows } = MAZE_TIERS[tier];
-  const maze = generateMaze(cols, rows);
+  const style = STYLE === "all"
+    ? STYLE_POOL_BY_MODE.pve[Math.floor(Math.random() * STYLE_POOL_BY_MODE.pve.length)]
+    : STYLE;
+  const maze = generateMaze(cols, rows, style);
   const half = CELL_SIZE / 2;
 
   const corner = [

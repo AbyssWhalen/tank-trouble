@@ -17,7 +17,7 @@
 import {
   CANVAS, PLAYER_COLORS, KEY_BINDINGS, MAZE_TIERS, TIER_POOL_BY_MODE,
   WALL, CELL_SIZE, BULLET, TANK, THEME, ROUND_RESTART_DELAY,
-  POWERUP, PICKUP_RATE, MATCH_TARGET, ROUND_INTRO, SLOWMO,
+  POWERUP, PICKUP_RATE, MATCH_TARGET, ROUND_INTRO, SLOWMO, STYLE_POOL_BY_MODE,
 } from "./config.js";
 import { Player } from "./player.js";
 import { generateMaze, destroyWallsInRadius, destroyWallSegments } from "./maze.js";
@@ -171,7 +171,10 @@ function setupRound(mode) {
   const pool = TIER_POOL_BY_MODE[mode] || TIER_POOL_BY_MODE.pvp;
   const tier = pool[Math.floor(Math.random() * pool.length)];
   const { cols, rows } = MAZE_TIERS[tier];
-  maze = generateMaze(cols, rows);
+  // 风格与档位正交，各自随机抽（每回合换图+换风格，重复感立减）
+  const stylePool = STYLE_POOL_BY_MODE[mode] || STYLE_POOL_BY_MODE.pvp;
+  const style = stylePool[Math.floor(Math.random() * stylePool.length)];
+  maze = generateMaze(cols, rows, style);
 
   // 自适应缩放 + 居中：把竞技场世界尺寸喂给 fitArena
   const fit = fitArena(cols * CELL_SIZE, rows * CELL_SIZE);

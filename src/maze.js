@@ -15,7 +15,7 @@
 // 每个格用四面墙的开关表示：top/right/bottom/left。相邻两格共享一堵墙。
 // ============================================================
 
-import { CELL_SIZE, WALL_DENSITY, WALL } from "./config.js";
+import { CELL_SIZE, WALL_DENSITY, WALL, MAZE_STYLES } from "./config.js";
 import { closestPointOnSegment } from "./collision.js";
 
 // 四方向表：格间邻接 + 对应墙面名。maze 自用（泛洪/敲墙），ai.js 寻路也复用。
@@ -29,8 +29,9 @@ export const DIRS = [
 // 生成地图，返回 { cols, rows, cells, walls, cellSize }
 // cells[r][c] = { top, right, bottom, left }，true 表示该面有墙
 // walls = 去重后的线段数组 [{x1,y1,x2,y2}, ...]，世界坐标
-export function generateMaze(cols, rows) {
-  // --- 1) 全开放起步，仅封闭外边界 ---
+// style: MAZE_STYLES 键（sparse/symmetric/rooms），默认 sparse 向后兼容
+export function generateMaze(cols, rows, style = "sparse") {
+  // --- 1) 全开放起步，仅封闭外边界（风格无关的共同起点）---
   const cells = [];
   for (let r = 0; r < rows; r++) {
     const row = [];
@@ -45,7 +46,30 @@ export function generateMaze(cols, rows) {
     cells.push(row);
   }
 
-  // --- 2) 内部边按概率放墙 ---
+  // --- 2) 按风格放内墙（都只写 cells，成对写共享墙两面）---
+  if (style === "symmetric") {
+    fillSymmetric(cells, cols, rows);
+  } else if (style === "rooms") {
+    fillRooms(cells, cols, rows);
+  } else {
+    fillSparse(cells, cols, rows);
+  }
+
+  // --- 3) 连通性修复（风格无关兜底）---
+  ensureConnected(cells, cols, rows);
+
+  // --- 4) 对称风格补对称：ensureConnected 单边敲墙会破坏镜像，
+  //        把「本边有墙但镜像边无墙」的也敲掉（删墙只增连通，绝对安全）---
+  if (style === "symmetric") {
+    enforceSymmetry(cells, cols, rows);
+  }
+
+  const walls = buildWallSegments(cells, cols, rows);
+  return { cols, rows, cells, walls, cellSize: CELL_SIZE };
+}
+
+// —— 风格 1：稀疏格栅（原版风，独立随机每条内部边）——
+function fillSparse(cells, cols, rows) {
   // 垂直内墙：格 (c,r) 的 right ↔ 格 (c+1,r) 的 left
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols - 1; c++) {
@@ -64,12 +88,124 @@ export function generateMaze(cols, rows) {
       }
     }
   }
+}
 
-  // --- 3) 连通性修复 ---
-  ensureConnected(cells, cols, rows);
+// —— 风格 2：180° 中心对称——放一条内墙就同时放它的镜像。
+// 镜像映射：竖边 (c,r)（即格(c,r)右边）→ 竖边 (cols-2-c, rows-1-r)；
+//           横边 (c,r)（即格(c,r)下边）→ 横边 (cols-1-c, rows-2-r)。
+// 自映射的中心边只随机一次自然成立（放=两次幂等）。
+function fillSymmetric(cells, cols, rows) {
+  const density = MAZE_STYLES.symmetric.density;
+  const putV = (c, r) => { cells[r][c].right = true; cells[r][c + 1].left = true; };
+  const putH = (c, r) => { cells[r][c].bottom = true; cells[r + 1][c].top = true; };
 
-  const walls = buildWallSegments(cells, cols, rows);
-  return { cols, rows, cells, walls, cellSize: CELL_SIZE };
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols - 1; c++) {
+      const mc = cols - 2 - c, mr = rows - 1 - r;
+      // 只处理「前半」代表边（字典序 ≤ 镜像），避免每对被抽两次密度翻倍
+      if (r > mr || (r === mr && c > mc)) continue;
+      if (Math.random() < density) { putV(c, r); putV(mc, mr); }
+    }
+  }
+  for (let r = 0; r < rows - 1; r++) {
+    for (let c = 0; c < cols; c++) {
+      const mc = cols - 1 - c, mr = rows - 2 - r;
+      if (r > mr || (r === mr && c > mc)) continue;
+      if (Math.random() < density) { putH(c, r); putH(mc, mr); }
+    }
+  }
+}
+
+// symmetric 的对称修复：ensureConnected 敲墙后，凡「边有墙而镜像边无墙」
+// 的把本边也敲掉。只删不加 → 连通性只会更好。
+function enforceSymmetry(cells, cols, rows) {
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols - 1; c++) {
+      const mc = cols - 2 - c, mr = rows - 1 - r;
+      if (cells[r][c].right && !cells[mr][mc].right) {
+        cells[r][c].right = false;
+        cells[r][c + 1].left = false;
+      }
+    }
+  }
+  for (let r = 0; r < rows - 1; r++) {
+    for (let c = 0; c < cols; c++) {
+      const mc = cols - 1 - c, mr = rows - 2 - r;
+      if (cells[r][c].bottom && !cells[mr][mc].bottom) {
+        cells[r][c].bottom = false;
+        cells[r + 1][c].top = false;
+      }
+    }
+  }
+}
+
+// —— 风格 3：房间 + 走廊（简化 BSP：递归二分到边长 ∈ [roomMin, roomMax]，
+// 切缝放满墙，相邻房间的公共缝开门）——
+function fillRooms(cells, cols, rows) {
+  const { roomMin, roomMax, extraDoorChance } = MAZE_STYLES.rooms;
+  const putV = (c, r) => { cells[r][c].right = true; cells[r][c + 1].left = true; };
+  const putH = (c, r) => { cells[r][c].bottom = true; cells[r + 1][c].top = true; };
+  const cutV = (c, r) => { cells[r][c].right = false; cells[r][c + 1].left = false; };
+  const cutH = (c, r) => { cells[r][c].bottom = false; cells[r + 1][c].top = false; };
+
+  // 1) 递归二分出房间矩形（格坐标闭区间）
+  const rooms = [];
+  const queue = [{ c0: 0, r0: 0, c1: cols - 1, r1: rows - 1 }];
+  while (queue.length) {
+    const b = queue.pop();
+    const w = b.c1 - b.c0 + 1, h = b.r1 - b.r0 + 1;
+    if (w <= roomMax && h <= roomMax) { rooms.push(b); continue; }
+    // 沿较长边切；切点保证两侧都 ≥ roomMin
+    if (w >= h) {
+      const cut = b.c0 + roomMin - 1 + Math.floor(Math.random() * (w - 2 * roomMin + 1));
+      // 沿竖缝 cut|cut+1 放满墙
+      for (let r = b.r0; r <= b.r1; r++) putV(cut, r);
+      queue.push({ c0: b.c0, r0: b.r0, c1: cut, r1: b.r1 });
+      queue.push({ c0: cut + 1, r0: b.r0, c1: b.c1, r1: b.r1 });
+    } else {
+      const cut = b.r0 + roomMin - 1 + Math.floor(Math.random() * (h - 2 * roomMin + 1));
+      for (let c = b.c0; c <= b.c1; c++) putH(c, cut);
+      queue.push({ c0: b.c0, r0: b.r0, c1: b.c1, r1: cut });
+      queue.push({ c0: b.c0, r0: cut + 1, c1: b.c1, r1: b.r1 });
+    }
+  }
+
+  // 2) 每段连续墙缝开门：扫全图内墙，对每条「连续实墙段」开 1 扇门
+  //    （BSP 切缝会被后续切割截断成多段，按段开门比按房间对开更均匀），
+  //    extraDoorChance 概率再开第二扇（长缝双门增加环路，防纯树状单调）。
+  const openDoors = (segs, cutFn) => {
+    for (const seg of segs) {
+      if (!seg.length) continue;
+      const first = seg[Math.floor(Math.random() * seg.length)];
+      cutFn(first.c, first.r);
+      if (seg.length >= 3 && Math.random() < extraDoorChance) {
+        const second = seg[Math.floor(Math.random() * seg.length)];
+        cutFn(second.c, second.r);
+      }
+    }
+  };
+  // 收集竖向连续墙段（同一列 c|c+1 缝上连续的 r）
+  const vSegs = [];
+  for (let c = 0; c < cols - 1; c++) {
+    let cur = [];
+    for (let r = 0; r < rows; r++) {
+      if (cells[r][c].right) cur.push({ c, r });
+      else if (cur.length) { vSegs.push(cur); cur = []; }
+    }
+    if (cur.length) vSegs.push(cur);
+  }
+  // 横向同理（同一行 r|r+1 缝上连续的 c）
+  const hSegs = [];
+  for (let r = 0; r < rows - 1; r++) {
+    let cur = [];
+    for (let c = 0; c < cols; c++) {
+      if (cells[r][c].bottom) cur.push({ c, r });
+      else if (cur.length) { hSegs.push(cur); cur = []; }
+    }
+    if (cur.length) hSegs.push(cur);
+  }
+  openDoors(vSegs, cutV);
+  openDoors(hSegs, cutH);
 }
 
 // 拆掉两相邻格之间的墙（cells 侧的原子操作：同时清共享墙的两个面）。
