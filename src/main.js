@@ -35,8 +35,8 @@ import {
 } from "./input.js";
 import {
   renderMenu, renderPauseOverlay, renderHud, renderRoundOverBanner,
-  renderMatchOverBanner, renderRebindOverlay,
-  menuAction, pauseAction, rebindAction, matchOverAction, keyLabel,
+  renderMatchOverBanner, renderRebindOverlay, renderSettingsOverlay,
+  menuAction, pauseAction, rebindAction, settingsAction, matchOverAction, keyLabel,
 } from "./ui.js";
 import {
   initSettings, saveBindings, resetBindings,
@@ -113,6 +113,8 @@ let showHelp = false;          // 玩法说明浮窗是否显示（叠在菜单�
 // —— 键位设置面板状态（菜单子状态）——
 // capturing 非空表示等待玩家按下新键；conflictMsg 是面板内的红字提示（限时消失）
 const rebind = { open: false, capturing: null, conflictMsg: "", msgTimer: 0 };
+// 设置浮层开关（命名带 Panel 避免与 settings.js 的导入混淆）
+const settingsPanel = { open: false };
 const RESERVED_KEYS = ["Escape", "F11"]; // 系统语义键，禁止绑定（Esc=暂停/取消，F11=全屏）
 
 // 开发自检钩子（CDP 驱动验证用，见 CLAUDE.md「开发自检」）：
@@ -218,10 +220,14 @@ function update(dt) {
 }
 
 // 菜单：把点击交给 ui.menuAction 判定「点到了什么」，这里只做状态变更。
-// 键位面板打开时整个菜单交互移交 updateRebind（面板是独占浮层）。
+// 浮层分流顺序 = 层级（先判在上）：rebind > 设置面板 > 菜单本体。
 function updateMenu(dt) {
   if (rebind.open) {
     updateRebind(dt);
+    return;
+  }
+  if (settingsPanel.open) {
+    updateSettingsPanel();
     return;
   }
 
@@ -237,9 +243,29 @@ function updateMenu(dt) {
     case "openHelp":
       showHelp = true;
       break;
-    case "openRebind":
-      rebind.open = true;
+    case "openSettings":
+      settingsPanel.open = true;
       break;
+    case "mode":
+      startMatch(action.mode);
+      break;
+  }
+  playSfx("uiClick");
+}
+
+// 设置浮层：难度/道具/地形/音效 chip 与键位面板入口（阶段 19 从主菜单收纳）。
+// Esc 或点面板外关闭；点「键位设置…」在其上叠开 rebind 面板。
+function updateSettingsPanel() {
+  if (isJustPressed("Escape")) {
+    settingsPanel.open = false;
+    return;
+  }
+  if (!isClicked()) return;
+  const { x: mx, y: my } = getMousePos();
+  const action = settingsAction(mx, my);
+  if (!action) return;
+
+  switch (action.type) {
     case "aiLevel":
       aiLevel = action.key;
       break;
@@ -256,8 +282,11 @@ function updateMenu(dt) {
       wallBreakEnabled = !wallBreakEnabled;
       saveWallBreak(wallBreakEnabled);
       break;
-    case "mode":
-      startMatch(action.mode);
+    case "openRebind":
+      rebind.open = true;
+      break;
+    case "close":
+      settingsPanel.open = false;
       break;
   }
   // 点击音在 switch 之后：切到静音那下无声、解除静音那下有反馈，语义自洽
@@ -632,7 +661,17 @@ function render() {
 
   switch (state) {
     case STATE.MENU:
-      renderMenu(ctx, { mouse: getMousePos(), aiLevel, enabledPowerups, showHelp, muted: isMuted(), wallBreakEnabled });
+      renderMenu(ctx, { mouse: getMousePos(), showHelp });
+      // 浮层叠加顺序与 updateMenu 分流顺序相反：后画的在上（rebind 最顶）
+      if (settingsPanel.open) {
+        renderSettingsOverlay(ctx, {
+          mouse: getMousePos(),
+          aiLevel,
+          enabledPowerups,
+          wallBreakEnabled,
+          muted: isMuted(),
+        });
+      }
       if (rebind.open) {
         renderRebindOverlay(ctx, {
           mouse: getMousePos(),

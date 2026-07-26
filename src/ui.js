@@ -14,54 +14,66 @@ import { drawPowerupIcon } from "./powerup.js";
 // —— 菜单按钮（逻辑坐标，不随迷宫平移）——
 const BTN_W = 300, BTN_H = 66;
 const BTN_X = (CANVAS.width - BTN_W) / 2;
+// chips 收进设置面板后（阶段 19）模式按钮下移补空，整体视觉居中
 const buttons = [
-  { label: "双人对战", sub: "P1 vs P2", mode: "pvp", enabled: true, x: BTN_X, y: 322, w: BTN_W, h: BTN_H },
-  { label: "人机对战", sub: "P1 vs AI", mode: "pve", enabled: true, x: BTN_X, y: 410, w: BTN_W, h: BTN_H },
+  { label: "双人对战", sub: "P1 vs P2", mode: "pvp", enabled: true, x: BTN_X, y: 356, w: BTN_W, h: BTN_H },
+  { label: "人机对战", sub: "P1 vs AI", mode: "pve", enabled: true, x: BTN_X, y: 448, w: BTN_W, h: BTN_H },
 ];
 
-// —— AI 难度 chip（人机按钮正下方一排单选）——
+// —— 设置浮层面板（阶段 19：难度/道具/地形/音效 chip 与键位入口全收于此）——
+const SETTINGS_PANEL = { w: 560, h: 410 };
+SETTINGS_PANEL.x = (CANVAS.width - SETTINGS_PANEL.w) / 2;
+SETTINGS_PANEL.y = (CANVAS.height - SETTINGS_PANEL.h) / 2;
+
+// 面板内一行 chips 的居中 x 起点（+30 给行首标签留视觉重心偏移）
+function chipRowX(count) {
+  const CW = 88, GAP = 14;
+  return SETTINGS_PANEL.x + (SETTINGS_PANEL.w - (count * CW + (count - 1) * GAP)) / 2 + 30;
+}
+
+// —— AI 难度 chip（设置面板内一排单选）——
 const CHIP_W = 88, CHIP_H = 32, CHIP_GAP = 14;
 const chipKeys = Object.keys(AI_DIFFICULTY); // ["easy","normal","hard"]，展示顺序即定义顺序
-const CHIPS_X = (CANVAS.width - (chipKeys.length * CHIP_W + (chipKeys.length - 1) * CHIP_GAP)) / 2;
+const DIFF_ROW_Y = SETTINGS_PANEL.y + 104;
 const difficultyChips = chipKeys.map((key, i) => ({
   key,
-  x: CHIPS_X + i * (CHIP_W + CHIP_GAP),
-  y: 494, // 人机按钮底边 476 再留 18px
+  x: chipRowX(chipKeys.length) + i * (CHIP_W + CHIP_GAP),
+  y: DIFF_ROW_Y,
   w: CHIP_W,
   h: CHIP_H,
 }));
 
-// —— 道具类型 chip（难度 chip 下方一排，多选 toggle：选中=该类道具会刷新）——
-// 由 POWERUP.types 生成，新道具加进 config 自动出现在菜单；全不选=整局无道具。
+// —— 道具类型 chip（设置面板内一排，多选 toggle：选中=该类道具会刷新）——
+// 由 POWERUP.types 生成，新道具加进 config 自动出现；全不选=整局无道具。
 const POWERUP_LABELS = { scatter: "散射", shield: "护盾", laser: "激光", mine: "地雷" };
-const POW_CHIP_W = 88, POW_CHIP_H = 32, POW_CHIP_GAP = 14;
-const POW_CHIPS_X =
-  (CANVAS.width - (POWERUP.types.length * POW_CHIP_W + (POWERUP.types.length - 1) * POW_CHIP_GAP)) / 2;
+const POW_ROW_Y = DIFF_ROW_Y + 56;
 const powupChips = POWERUP.types.map((key, i) => ({
   key,
   label: POWERUP_LABELS[key] || key,
-  x: POW_CHIPS_X + i * (POW_CHIP_W + POW_CHIP_GAP),
-  y: 544, // 难度 chip 底边 526 再留 18px
-  w: POW_CHIP_W,
-  h: POW_CHIP_H,
+  x: chipRowX(POWERUP.types.length) + i * (CHIP_W + CHIP_GAP),
+  y: POW_ROW_Y,
+  w: CHIP_W,
+  h: CHIP_H,
 }));
 
-// —— 地形 chip（道具 chip 下方单枚居中，toggle：地雷炸墙开关）——
-const wallBreakChip = {
-  x: (CANVAS.width - POW_CHIP_W) / 2,
-  y: 594, // 道具 chip 底边 576 再留 18px
-  w: POW_CHIP_W,
-  h: POW_CHIP_H,
+// —— 地形（炸墙）与音效（静音反义：选中=有声）toggle，同一行 ——
+const MISC_ROW_Y = POW_ROW_Y + 56;
+const wallBreakChip = { x: chipRowX(2), y: MISC_ROW_Y, w: CHIP_W, h: CHIP_H };
+const audioChip = { x: chipRowX(2) + CHIP_W + CHIP_GAP, y: MISC_ROW_Y, w: CHIP_W, h: CHIP_H };
+
+// —— 面板内「键位设置」入口按钮（打开 rebind 面板，浮层叠浮层）——
+const settingsRebindBtn = {
+  x: (CANVAS.width - 160) / 2,
+  y: MISC_ROW_Y + 68,
+  w: 160,
+  h: 40,
 };
 
 // —— 玩法说明按钮（右下角圆形 "?" 按钮，点开浮窗）——
 const helpBtn = { x: CANVAS.width - 56, y: CANVAS.height - 56, r: 20 };
 
-// —— 键位设置按钮（左下角圆形按钮，与右下 "?" 对称）——
-const rebindBtn = { x: 56, y: CANVAS.height - 56, r: 20 };
-
-// —— 音效开关按钮（「键」按钮右侧，同规格，设置类按钮成组）——
-const audioBtn = { x: 108, y: CANVAS.height - 56, r: 20 };
+// —— 设置按钮（左下角圆形 ⚙，打开设置浮层；与右下 "?" 对称）——
+const settingsBtn = { x: 56, y: CANVAS.height - 56, r: 20 };
 
 // —— 键位设置面板（居中浮窗）：布局常量 + 每个键位 chip 的命中矩形 ——
 const REBIND_PANEL = { w: 620, h: 540 };
@@ -164,13 +176,22 @@ function moveKeysLabel(i) {
 // ============================================================
 
 // 菜单点击。判定优先级与浮层遮挡关系保持一致：
-// 说明浮窗（开着时点任意处关闭）> 帮助按钮 > 键位设置按钮 > 难度 chip > 道具 chip > 模式按钮
-// （键位面板开着时的点击不走这里，由 rebindAction 处理——main 按自身状态分流）
+// 说明浮窗（开着时点任意处关闭）> 帮助按钮 > 设置按钮 > 模式按钮
+// （设置/键位面板开着时的点击不走这里，由 settingsAction/rebindAction 处理——
+//  main 按自身状态分流，分流顺序 rebind > settings > 菜单）
 export function menuAction(mx, my, { showHelp }) {
   if (showHelp) return { type: "closeHelp" };
   if (hitCircle(mx, my, helpBtn.x, helpBtn.y, helpBtn.r)) return { type: "openHelp" };
-  if (hitCircle(mx, my, rebindBtn.x, rebindBtn.y, rebindBtn.r)) return { type: "openRebind" };
-  if (hitCircle(mx, my, audioBtn.x, audioBtn.y, audioBtn.r)) return { type: "toggleMute" };
+  if (hitCircle(mx, my, settingsBtn.x, settingsBtn.y, settingsBtn.r)) return { type: "openSettings" };
+  for (const b of buttons) {
+    if (b.enabled && hitRect(mx, my, b)) return { type: "mode", mode: b.mode };
+  }
+  return null;
+}
+
+// 设置面板点击（面板打开时 main 只走这里）。三段式：
+// 具体元素 → 面板内空白 null（吞点击不漏到菜单）→ 面板外 close
+export function settingsAction(mx, my) {
   for (const c of difficultyChips) {
     if (hitRect(mx, my, c)) return { type: "aiLevel", key: c.key };
   }
@@ -178,10 +199,11 @@ export function menuAction(mx, my, { showHelp }) {
     if (hitRect(mx, my, c)) return { type: "togglePowerup", key: c.key };
   }
   if (hitRect(mx, my, wallBreakChip)) return { type: "toggleWallBreak" };
-  for (const b of buttons) {
-    if (b.enabled && hitRect(mx, my, b)) return { type: "mode", mode: b.mode };
-  }
-  return null;
+  if (hitRect(mx, my, audioChip)) return { type: "toggleMute" };
+  if (hitRect(mx, my, settingsRebindBtn)) return { type: "openRebind" };
+  const p = SETTINGS_PANEL;
+  if (mx >= p.x && mx <= p.x + p.w && my >= p.y && my <= p.y + p.h) return null;
+  return { type: "close" };
 }
 
 // 暂停浮层点击：返回 "resume" | "menu" | null
@@ -219,7 +241,7 @@ export function rebindAction(mx, my) {
 // 绘制
 // ============================================================
 
-// 主菜单。view = { mouse:{x,y}, aiLevel, enabledPowerups:Set, showHelp }
+// 主菜单（阶段 19 瘦身后只剩标题/键位卡/模式按钮/两圆钮）。view = { mouse:{x,y}, showHelp }
 export function renderMenu(ctx, view) {
   const cx = CANVAS.width / 2;
   const { x: mx, y: my } = view.mouse;
@@ -274,42 +296,10 @@ export function renderMenu(ctx, view) {
     ctx.fillText(b.sub, b.x + b.w / 2, b.y + b.h / 2 + 16);
   }
 
-  // AI 难度 chip（单选：选中主题色实心，未选白底；只影响人机对战）
-  ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.textAlign = "right";
-  ctx.fillStyle = THEME.textDim;
-  ctx.fillText("AI 难度", difficultyChips[0].x - 14, difficultyChips[0].y + CHIP_H / 2);
-  ctx.textAlign = "center";
-  for (const c of difficultyChips) {
-    const selected = c.key === view.aiLevel;
-    const hover = hitRect(mx, my, c);
-    renderChip(ctx, c, AI_DIFFICULTY[c.key].label, selected, hover);
-  }
-
-  // 道具类型 chip（多选：亮=启用该类道具，全灭=整局无道具）
-  ctx.textAlign = "right";
-  ctx.fillStyle = THEME.textDim;
-  ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.fillText("道具", powupChips[0].x - 14, powupChips[0].y + POW_CHIP_H / 2);
-  ctx.textAlign = "center";
-  for (const c of powupChips) {
-    const selected = view.enabledPowerups.has(c.key);
-    const hover = hitRect(mx, my, c);
-    renderChip(ctx, c, c.label, selected, hover);
-  }
-
-  // 地形 chip（单枚 toggle：地雷炸墙）
-  ctx.textAlign = "right";
-  ctx.fillStyle = THEME.textDim;
-  ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.fillText("地形", wallBreakChip.x - 14, wallBreakChip.y + POW_CHIP_H / 2);
-  ctx.textAlign = "center";
-  renderChip(ctx, wallBreakChip, "炸墙", view.wallBreakEnabled, hitRect(mx, my, wallBreakChip));
-
-  // 玩法说明按钮（右下角圆形 "?"）+ 键位设置按钮（左下角）+ 音效开关
+  // 玩法说明按钮（右下角圆形 "?"）+ 设置按钮（左下角 ⚙）
+  // 难度/道具/地形/音效 chip 已收进设置浮层（renderSettingsOverlay）
   renderHelpButton(ctx, mx, my);
-  renderRebindButton(ctx, mx, my);
-  renderAudioButton(ctx, mx, my, view.muted);
+  renderSettingsButton(ctx, mx, my);
 
   // 底部提示 + 快捷键
   ctx.fillStyle = THEME.textDim;
@@ -403,11 +393,11 @@ function renderHelpButton(ctx, mx, my) {
   ctx.fillText("?", helpBtn.x, helpBtn.y + 1);
 }
 
-// 左下角圆形「键」按钮（打开键位设置面板）
-function renderRebindButton(ctx, mx, my) {
-  const hover = hitCircle(mx, my, rebindBtn.x, rebindBtn.y, rebindBtn.r);
+// 左下角圆形 ⚙ 按钮（打开设置浮层）
+function renderSettingsButton(ctx, mx, my) {
+  const hover = hitCircle(mx, my, settingsBtn.x, settingsBtn.y, settingsBtn.r);
   ctx.beginPath();
-  ctx.arc(rebindBtn.x, rebindBtn.y, rebindBtn.r, 0, Math.PI * 2);
+  ctx.arc(settingsBtn.x, settingsBtn.y, settingsBtn.r, 0, Math.PI * 2);
   ctx.fillStyle = hover ? THEME.accent : THEME.btnFill;
   ctx.fill();
   ctx.lineWidth = 1.5;
@@ -415,38 +405,83 @@ function renderRebindButton(ctx, mx, my) {
   ctx.stroke();
 
   ctx.fillStyle = hover ? "#ffffff" : THEME.accent;
-  ctx.font = "bold 14px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("键", rebindBtn.x, rebindBtn.y + 1);
-}
-
-// 「键」按钮右侧的音效开关圆钮：♪ 有声 / 静音时画斜杠压在音符上
-function renderAudioButton(ctx, mx, my, muted) {
-  const hover = hitCircle(mx, my, audioBtn.x, audioBtn.y, audioBtn.r);
-  ctx.beginPath();
-  ctx.arc(audioBtn.x, audioBtn.y, audioBtn.r, 0, Math.PI * 2);
-  ctx.fillStyle = hover ? THEME.accent : THEME.btnFill;
-  ctx.fill();
-  ctx.lineWidth = 1.5;
-  ctx.strokeStyle = THEME.accent;
-  ctx.stroke();
-
-  const fg = hover ? "#ffffff" : muted ? THEME.textDim : THEME.accent;
-  ctx.fillStyle = fg;
   ctx.font = "bold 16px system-ui, sans-serif";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText("♪", audioBtn.x, audioBtn.y + 1);
-  if (muted) {
-    // 斜杠盖在音符上表示静音（不换字形，避免字体缺 emoji 静音符）
-    ctx.strokeStyle = fg;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(audioBtn.x - 9, audioBtn.y + 9);
-    ctx.lineTo(audioBtn.x + 9, audioBtn.y - 9);
-    ctx.stroke();
+  ctx.fillText("⚙", settingsBtn.x, settingsBtn.y + 1);
+}
+
+// 设置浮层面板。view = { mouse, aiLevel, enabledPowerups:Set, wallBreakEnabled, muted }
+// 只画不改状态，交互全在 main（settingsAction 命中 → main 变更）。
+export function renderSettingsOverlay(ctx, view) {
+  const { x: mx, y: my } = view.mouse;
+  const p = SETTINGS_PANEL;
+  const cx = CANVAS.width / 2;
+
+  // 半透明遮罩 + 面板底（同键位面板风格）
+  ctx.fillStyle = "rgba(43,43,51,0.55)";
+  ctx.fillRect(0, 0, CANVAS.width, CANVAS.height);
+  ctx.fillStyle = THEME.pageBg;
+  roundRect(ctx, p.x, p.y, p.w, p.h, 14);
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = THEME.accent;
+  roundRect(ctx, p.x, p.y, p.w, p.h, 14);
+  ctx.stroke();
+
+  // 标题
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = THEME.title;
+  ctx.font = "bold 28px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText("设置", cx, p.y + 44);
+
+  // 行首标签统一画法
+  const rowLabel = (text, chip) => {
+    ctx.textAlign = "right";
+    ctx.fillStyle = THEME.textDim;
+    ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
+    ctx.fillText(text, chip.x - 14, chip.y + CHIP_H / 2);
+    ctx.textAlign = "center";
+  };
+
+  // AI 难度（单选，只影响人机对战）
+  rowLabel("AI 难度", difficultyChips[0]);
+  for (const c of difficultyChips) {
+    renderChip(ctx, c, AI_DIFFICULTY[c.key].label, c.key === view.aiLevel, hitRect(mx, my, c));
   }
+
+  // 道具（多选，全灭=整局无道具）
+  rowLabel("道具", powupChips[0]);
+  for (const c of powupChips) {
+    renderChip(ctx, c, c.label, view.enabledPowerups.has(c.key), hitRect(mx, my, c));
+  }
+
+  // 地形 + 音效同一行
+  rowLabel("其他", wallBreakChip);
+  renderChip(ctx, wallBreakChip, "炸墙", view.wallBreakEnabled, hitRect(mx, my, wallBreakChip));
+  renderChip(ctx, audioChip, "音效", !view.muted, hitRect(mx, my, audioChip));
+
+  // 键位设置入口按钮
+  {
+    const b = settingsRebindBtn;
+    const hover = hitRect(mx, my, b);
+    ctx.fillStyle = hover ? THEME.accent : THEME.btnFill;
+    roundRect(ctx, b.x, b.y, b.w, b.h, 10);
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = hover ? THEME.accent : THEME.btnDisabledBorder;
+    roundRect(ctx, b.x, b.y, b.w, b.h, 10);
+    ctx.stroke();
+    ctx.fillStyle = hover ? "#ffffff" : THEME.textMain;
+    ctx.font = "bold 16px system-ui, 'Microsoft YaHei', sans-serif";
+    ctx.fillText("键位设置…", b.x + b.w / 2, b.y + b.h / 2);
+  }
+
+  // 底部提示
+  ctx.fillStyle = THEME.textDim;
+  ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText("点击面板外或按 Esc 关闭", cx, p.y + p.h - 26);
 }
 
 // 键位设置面板。view = { mouse, capturing: {player, action}|null, conflictMsg }
@@ -605,7 +640,7 @@ function renderHelpOverlay(ctx, cx) {
   line("散射：连续 3 次扇形开火（一炮 3 发）");
   line("激光：下一发开火变瞬时射线，沿墙反弹、命中即杀；红色虚线全程预示弹道");
   line("地雷：捡取后按道具键在车尾布雷（共 2 颗），1 秒布防后近敌即炸（不认主人）");
-  line("炸墙：子弹撞内墙会逐渐磨碎它（墙越淡越脆），地雷爆炸直接炸穿；菜单「地形」可关");
+  line("炸墙：子弹撞内墙会逐渐磨碎它（墙越淡越脆），地雷爆炸直接炸穿；设置里可关");
   ly += 6;
 
   section("快捷键");

@@ -35,9 +35,9 @@ Local multiplayer tank combat game with procedural maze generation, bullet ricoc
 
 ## 按键操作 | Controls
 
-默认键位如下，可在菜单左下角「键」按钮里自定义（重启后保留）。
+默认键位如下，可在菜单左下角 ⚙ 设置面板的「键位设置」里自定义（重启后保留）。
 
-Default bindings below — rebind them via the "键" button at the bottom-left of the menu (persisted across restarts).
+Default bindings below — rebind them via ⚙ Settings → 键位设置 at the bottom-left of the menu (persisted across restarts).
 
 ### 玩家 1 | Player 1
 - **移动** | Move: `W` `A` `S` `D`
@@ -148,6 +148,7 @@ Zero runtime dependencies, pure frontend implementation.
 - **阶段 16**：HUD 武器/护盾徽章（剩余次数 + 到期闪烁）+ 局胜制（先到 5 分整场结算，可再来一场）
 - **阶段 17**：可破坏内墙——地雷爆炸炸碎波及圈内墙（外墙不破），地形随战斗演变；菜单「地形」开关
 - **阶段 18**：子弹磨墙——内墙带耐久，子弹逐发侵蚀（墙渐淡示血量）归零碎掉；破坏从此每回合可见
+- **阶段 19**：主菜单瘦身——难度/道具/地形/音效与键位入口全部收进 ⚙ 设置浮层，首屏只留模式选择
 
 ---
 
