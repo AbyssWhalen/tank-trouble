@@ -698,6 +698,56 @@ section("地图生成 (generateMaze 三风格)");
 }
 
 // ============================================================
+section("关卡表与过关判定 (levels)");
+{
+  const { LEVELS, LEVEL_COUNT, evaluateObjective, normalizeProgress } = await import("../src/levels.js");
+  const { MAZE_STYLES, AI_DIFFICULTY } = await import("../src/config.js");
+
+  {
+    const idsOk = LEVELS.every((l, i) => l.id === i + 1);
+    const tiersOk = LEVELS.every((l) => MAZE_TIERS[l.map.tier] && MAZE_STYLES[l.map.style]);
+    const enemiesOk = LEVELS.every((l) =>
+      l.enemies.length >= 1 && l.enemies.length <= 3 &&
+      l.enemies.every((e) => AI_DIFFICULTY[e.level] && ["tl", "tr", "bl", "br"].includes(e.spawn)));
+    const powupsOk = LEVELS.every((l) => l.powerups.every((t) => POWERUP.types.includes(t)));
+    const objOk = LEVELS.every((l) => ["eliminate", "survive", "eliminateTimed"].includes(l.objective));
+    const mutOk = LEVELS.every((l) =>
+      (l.objective !== "survive" || l.mutators.surviveTime > 0) &&
+      (l.objective !== "eliminateTimed" || l.mutators.timeLimit > 0));
+    check("关卡表结构不变量（id/tier/style/敌人/道具/目标/mutator）",
+      idsOk && tiersOk && enemiesOk && powupsOk && objOk && mutOk, `共 ${LEVEL_COUNT} 关`);
+  }
+  {
+    const elim = { objective: "eliminate", mutators: {} };
+    check("歼灭关真值表",
+      evaluateObjective(elim, { playerAlive: true, enemiesAlive: 0, levelTimer: 0 }) === "win" &&
+      evaluateObjective(elim, { playerAlive: true, enemiesAlive: 1, levelTimer: 0 }) === null &&
+      evaluateObjective(elim, { playerAlive: false, enemiesAlive: 1, levelTimer: 0 }) === "lose" &&
+      evaluateObjective(elim, { playerAlive: false, enemiesAlive: 0, levelTimer: 0 }) === "lose"); // 同归=败
+  }
+  {
+    const surv = { objective: "survive", mutators: { surviveTime: 45 } };
+    check("生存关真值表",
+      evaluateObjective(surv, { playerAlive: true, enemiesAlive: 1, levelTimer: 44 }) === null &&
+      evaluateObjective(surv, { playerAlive: true, enemiesAlive: 1, levelTimer: 45 }) === "win" &&
+      evaluateObjective(surv, { playerAlive: false, enemiesAlive: 1, levelTimer: 50 }) === "lose");
+  }
+  {
+    const timed = { objective: "eliminateTimed", mutators: { timeLimit: 90 } };
+    check("限时歼灭关真值表",
+      evaluateObjective(timed, { playerAlive: true, enemiesAlive: 0, levelTimer: 10 }) === "win" &&
+      evaluateObjective(timed, { playerAlive: true, enemiesAlive: 1, levelTimer: 10 }) === null &&
+      evaluateObjective(timed, { playerAlive: true, enemiesAlive: 1, levelTimer: 0 }) === "lose");
+  }
+  {
+    check("进度宽松校验",
+      normalizeProgress(null) === 0 && normalizeProgress(-2) === 0 &&
+      normalizeProgress(3.7) === 3 && normalizeProgress(999) === LEVEL_COUNT &&
+      normalizeProgress("bad") === 0);
+  }
+}
+
+// ============================================================
 section("战绩统计 (stats 纯函数)");
 {
   const { normalizeStats, accuracy, favoriteWeapon, updateStreak } = await import("../src/stats.js");

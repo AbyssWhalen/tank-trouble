@@ -10,14 +10,16 @@ import {
   CANVAS, THEME, AI_DIFFICULTY, PLAYER_COLORS, KEY_BINDINGS, POWERUP,
 } from "./config.js";
 import { drawPowerupIcon } from "./powerup.js";
+import { LEVELS } from "./levels.js";
 
 // —— 菜单按钮（逻辑坐标，不随迷宫平移）——
 const BTN_W = 300, BTN_H = 66;
 const BTN_X = (CANVAS.width - BTN_W) / 2;
-// chips 收进设置面板后（阶段 19）模式按钮下移补空，整体视觉居中
+// 三模式按钮（阶段 23 挑战模式加入后按 84px 间距重排）
 const buttons = [
-  { label: "双人对战", sub: "P1 vs P2", mode: "pvp", enabled: true, x: BTN_X, y: 356, w: BTN_W, h: BTN_H },
-  { label: "人机对战", sub: "P1 vs AI", mode: "pve", enabled: true, x: BTN_X, y: 448, w: BTN_W, h: BTN_H },
+  { label: "双人对战", sub: "P1 vs P2", mode: "pvp", enabled: true, x: BTN_X, y: 340, w: BTN_W, h: BTN_H },
+  { label: "人机对战", sub: "P1 vs AI", mode: "pve", enabled: true, x: BTN_X, y: 424, w: BTN_W, h: BTN_H },
+  { label: "挑战模式", sub: "单人闯关", mode: "challenge", enabled: true, x: BTN_X, y: 508, w: BTN_W, h: BTN_H },
 ];
 
 // —— 设置浮层面板（阶段 19：难度/道具/地形/音效 chip 与键位入口全收于此）——
@@ -68,6 +70,19 @@ const settingsRebindBtn = {
   w: 160,
   h: 40,
 };
+
+// —— 关卡选择浮层（挑战模式入口）：4×2 网格卡片 ——
+const LEVEL_PANEL = { w: 640, h: 480 };
+LEVEL_PANEL.x = (CANVAS.width - LEVEL_PANEL.w) / 2;
+LEVEL_PANEL.y = (CANVAS.height - LEVEL_PANEL.h) / 2;
+const LEVEL_CARD = { w: 136, h: 132, gapX: 14, gapY: 16 };
+const levelCards = LEVELS.map((lv, i) => ({
+  index: i,
+  x: LEVEL_PANEL.x + 46 + (i % 4) * (LEVEL_CARD.w + LEVEL_CARD.gapX),
+  y: LEVEL_PANEL.y + 104 + Math.floor(i / 4) * (LEVEL_CARD.h + LEVEL_CARD.gapY),
+  w: LEVEL_CARD.w,
+  h: LEVEL_CARD.h,
+}));
 
 // —— 玩法说明按钮（右下角圆形 "?" 按钮，点开浮窗）——
 const helpBtn = { x: CANVAS.width - 56, y: CANVAS.height - 56, r: 20 };
@@ -184,7 +199,10 @@ export function menuAction(mx, my, { showHelp }) {
   if (hitCircle(mx, my, helpBtn.x, helpBtn.y, helpBtn.r)) return { type: "openHelp" };
   if (hitCircle(mx, my, settingsBtn.x, settingsBtn.y, settingsBtn.r)) return { type: "openSettings" };
   for (const b of buttons) {
-    if (b.enabled && hitRect(mx, my, b)) return { type: "mode", mode: b.mode };
+    if (b.enabled && hitRect(mx, my, b)) {
+      // 挑战模式先开选关浮层，不直接开局
+      return b.mode === "challenge" ? { type: "openLevelSelect" } : { type: "mode", mode: b.mode };
+    }
   }
   return null;
 }
@@ -220,6 +238,40 @@ export function matchOverAction(mx, my) {
     if (hitRect(mx, my, b)) return b.action;
   }
   return null;
+}
+
+// 关卡选择浮层点击（三段式：卡片 → 面板内 null → 面板外 close）。
+// progress = 已通关数；只有已解锁（index <= progress）的卡片可点。
+export function levelSelectAction(mx, my, progress) {
+  for (const c of levelCards) {
+    if (hitRect(mx, my, c)) {
+      return c.index <= progress ? { type: "startLevel", index: c.index } : null; // 锁定卡吞点击
+    }
+  }
+  const p = LEVEL_PANEL;
+  if (mx >= p.x && mx <= p.x + p.w && my >= p.y && my <= p.y + p.h) return null;
+  return { type: "close" };
+}
+
+// 关卡结算横幅点击：返回 "next" | "retry" | "menu" | null。
+// 按钮布局随胜负变化（胜且有下一关=三钮，否则两钮），与 renderLevelOverBanner 共享 levelOverButtons
+export function levelOverAction(mx, my, { win, hasNext }) {
+  for (const b of levelOverButtons(win, hasNext)) {
+    if (hitRect(mx, my, b)) return b.action;
+  }
+  return null;
+}
+
+// 关卡结算按钮布局（渲染与命中共用，随状态生成）
+function levelOverButtons(win, hasNext) {
+  const btns = [];
+  if (win && hasNext) btns.push({ label: "下一关", action: "next" });
+  btns.push({ label: win ? "再打一次" : "重试", action: "retry" });
+  btns.push({ label: "返回选关", action: "menu" });
+  const W = 200, H = 52, GAP = 20;
+  const totalW = btns.length * W + (btns.length - 1) * GAP;
+  const x0 = (CANVAS.width - totalW) / 2;
+  return btns.map((b, i) => ({ ...b, x: x0 + i * (W + GAP), y: 460, w: W, h: H }));
 }
 
 // 键位设置面板点击（面板打开时 main 只走这里）：
@@ -727,10 +779,42 @@ export function renderPauseOverlay(ctx, mouse) {
 
 // 顶部计分/状态条（固定，不随迷宫平移）。
 // view = { players, matchScores, isPlaying }：isPlaying 时底部提示 Esc 退出。
-export function renderHud(ctx, { players, matchScores, isPlaying }) {
+export function renderHud(ctx, { players, matchScores, isPlaying, challenge }) {
   ctx.textBaseline = "middle";
   ctx.font = "bold 18px system-ui, 'Microsoft YaHei', sans-serif";
   const y = 22;
+
+  // 关卡模式：左侧玩家条照旧（含徽章），右侧改聚合显示——多敌人时
+  // 逐一排计分条会重叠且无意义（关卡没有累计比分）
+  if (challenge) {
+    const p = players[0];
+    ctx.textAlign = "left";
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(27, y, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = p.alive ? THEME.textMain : THEME.textDim;
+    const text = `${p.label}${p.alive ? "" : "  阵亡"}`;
+    ctx.fillText(text, 42, y);
+    const textW = ctx.measureText(text).width;
+    renderWeaponBadges(ctx, p.tank, 42 + textW + 22, y, 26);
+    ctx.font = "bold 18px system-ui, 'Microsoft YaHei', sans-serif";
+
+    ctx.textAlign = "right";
+    ctx.fillStyle = THEME.textMain;
+    const timerStr = challenge.timer !== null ? `　⏱ ${Math.ceil(challenge.timer)}s` : "";
+    ctx.fillText(`第 ${challenge.levelId} 关　敌 ×${challenge.enemiesAlive}${timerStr}`, CANVAS.width - 20, y);
+    ctx.textAlign = "left";
+
+    if (isPlaying) {
+      ctx.fillStyle = THEME.textDim;
+      ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Esc  暂停", CANVAS.width / 2, CANVAS.height - 16);
+      ctx.textAlign = "left";
+    }
+    return;
+  }
 
   for (let i = 0; i < players.length; i++) {
     const p = players[i];
@@ -918,4 +1002,106 @@ export function renderMatchOverBanner(ctx, { winner, matchScores, players, mouse
   ctx.fillStyle = THEME.textDim;
   ctx.font = "15px system-ui, 'Microsoft YaHei', sans-serif";
   ctx.fillText("R  再来一场          Esc  返回菜单", cx, 600);
+}
+
+// 关卡选择浮层。view = { mouse, progress }（progress=已通关数）。
+// 已解锁卡片：白底可点（hover 主题色）；当前进度那关高亮描边；锁定卡灰显。
+export function renderLevelSelectOverlay(ctx, view) {
+  const { x: mx, y: my } = view.mouse;
+  const p = LEVEL_PANEL;
+  const cx = CANVAS.width / 2;
+
+  ctx.fillStyle = "rgba(43,43,51,0.55)";
+  ctx.fillRect(0, 0, CANVAS.width, CANVAS.height);
+  ctx.fillStyle = THEME.pageBg;
+  roundRect(ctx, p.x, p.y, p.w, p.h, 14);
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = THEME.accent;
+  roundRect(ctx, p.x, p.y, p.w, p.h, 14);
+  ctx.stroke();
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = THEME.title;
+  ctx.font = "bold 28px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText("挑战模式", cx, p.y + 44);
+  ctx.fillStyle = THEME.textDim;
+  ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText(`已通关 ${view.progress} / ${LEVELS.length}`, cx, p.y + 72);
+
+  for (const c of levelCards) {
+    const lv = LEVELS[c.index];
+    const unlocked = c.index <= view.progress;
+    const cleared = c.index < view.progress;
+    const hover = unlocked && hitRect(mx, my, c);
+
+    ctx.fillStyle = !unlocked ? THEME.btnDisabledFill : hover ? THEME.accent : THEME.btnFill;
+    roundRect(ctx, c.x, c.y, c.w, c.h, 10);
+    ctx.fill();
+    ctx.lineWidth = c.index === view.progress ? 2.5 : 1.5;
+    ctx.strokeStyle = !unlocked ? THEME.btnDisabledBorder
+      : c.index === view.progress ? THEME.accent : hover ? THEME.accent : THEME.btnDisabledBorder;
+    roundRect(ctx, c.x, c.y, c.w, c.h, 10);
+    ctx.stroke();
+
+    const fg = !unlocked ? THEME.btnDisabledText : hover ? "#ffffff" : THEME.textMain;
+    ctx.fillStyle = fg;
+    ctx.font = "bold 26px system-ui, sans-serif";
+    ctx.fillText(unlocked ? String(lv.id) : "🔒", c.x + c.w / 2, c.y + 36);
+    ctx.font = "bold 15px system-ui, 'Microsoft YaHei', sans-serif";
+    ctx.fillText(unlocked ? lv.name : "未解锁", c.x + c.w / 2, c.y + 68);
+    if (unlocked) {
+      ctx.fillStyle = hover ? "rgba(255,255,255,0.85)" : THEME.textDim;
+      ctx.font = "11px system-ui, 'Microsoft YaHei', sans-serif";
+      ctx.fillText(lv.desc, c.x + c.w / 2, c.y + 92, c.w - 12);
+      if (cleared) {
+        ctx.fillStyle = hover ? "#ffffff" : "#2e9e46";
+        ctx.font = "bold 13px system-ui, sans-serif";
+        ctx.fillText("✓ 已通关", c.x + c.w / 2, c.y + 114);
+      }
+    }
+  }
+
+  ctx.fillStyle = THEME.textDim;
+  ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText("点击面板外或按 Esc 关闭", cx, p.y + p.h - 22);
+}
+
+// 关卡结算横幅。view = { win, level, hasNext, mouse }
+export function renderLevelOverBanner(ctx, view) {
+  const { win, level, hasNext, mouse } = view;
+  const { x: mx, y: my } = mouse;
+  const cx = CANVAS.width / 2;
+
+  ctx.fillStyle = THEME.overlay;
+  ctx.fillRect(0, 0, CANVAS.width, CANVAS.height);
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = win ? "#2e9e46" : "#c0392b";
+  ctx.font = "bold 56px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText(win ? `第 ${level.id} 关通过！` : "挑战失败", cx, 260);
+
+  ctx.fillStyle = THEME.textMain;
+  ctx.font = "20px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText(win ? (hasNext ? "下一关已解锁" : "全部关卡通关，你就是回廊之王 🏆") : level.hint, cx, 330);
+
+  for (const b of levelOverButtons(win, hasNext)) {
+    const hover = hitRect(mx, my, b);
+    ctx.fillStyle = hover ? THEME.accent : "#ffffff";
+    roundRect(ctx, b.x, b.y, b.w, b.h, 10);
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = hover ? THEME.accentLight : THEME.btnBorder;
+    roundRect(ctx, b.x, b.y, b.w, b.h, 10);
+    ctx.stroke();
+    ctx.fillStyle = hover ? "#ffffff" : THEME.textMain;
+    ctx.font = "bold 19px system-ui, 'Microsoft YaHei', sans-serif";
+    ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2);
+  }
+
+  ctx.fillStyle = THEME.textDim;
+  ctx.font = "15px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText("R  重试          Esc  返回选关", cx, 560);
 }

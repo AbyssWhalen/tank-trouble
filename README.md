@@ -8,7 +8,7 @@ Local multiplayer tank combat game with procedural maze generation, bullet ricoc
 
 ## 游戏特色 | Features
 
-- 🎮 **双人对战 + 人机模式** | PvP & PvE modes
+- 🎮 **双人对战 + 人机 + 挑战闯关** | PvP, PvE & single-player challenge campaign (8 levels)
 - 🗺️ **随机迷宫·三种风格轮换** | Procedural mazes in 3 styles (sparse grid / mirrored arena / rooms & corridors) × 3 size tiers
 - 💥 **子弹反弹物理** | Realistic bullet ricochet off walls
 - 🎁 **四种道具·菜单可自选组合** | 4 power-ups, individually toggleable:
@@ -153,6 +153,7 @@ Zero runtime dependencies, pure frontend implementation.
 - **阶段 20**：表现层打磨——开场 3-2-1-GO 倒计时（冻结双方，修 AI 抢先手）+ 击杀慢动作 + 战绩统计（命中率/最爱武器/连胜，本地持久化）
 - **阶段 21**：地图生成器三风格——稀疏格栅 / 180° 对称竞技场（绝对公平）/ 房间走廊（BSP），每回合随机轮换
 - **阶段 22**：AI 行为大修——修复隔墙对撞死锁（半径感知导航）、十余项决策 bug；hard 档学会磨墙开路；卡住次数降一个数量级
+- **阶段 23**：挑战关卡模式——单人闯关 8 关（1v2 车轮战/激光狙击/限时歼灭/生存），顺序解锁，进度持久化
 
 ---
 

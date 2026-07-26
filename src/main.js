@@ -36,14 +36,18 @@ import {
 import {
   renderMenu, renderPauseOverlay, renderHud, renderRoundOverBanner,
   renderMatchOverBanner, renderRebindOverlay, renderSettingsOverlay, renderCountdown,
-  menuAction, pauseAction, rebindAction, settingsAction, matchOverAction, keyLabel,
+  renderLevelSelectOverlay, renderLevelOverBanner,
+  menuAction, pauseAction, rebindAction, settingsAction, matchOverAction,
+  levelSelectAction, levelOverAction, keyLabel,
 } from "./ui.js";
 import {
   initSettings, saveBindings, resetBindings,
   loadEnabledPowerups, saveEnabledPowerups,
   loadAudioMuted, saveAudioMuted,
   loadWallBreak, saveWallBreak,
+  loadChallengeProgress, saveChallengeProgress,
 } from "./settings.js";
+import { LEVELS, LEVEL_COUNT, evaluateObjective, normalizeProgress } from "./levels.js";
 import { initAudio, playSfx, toggleMuted, isMuted } from "./audio.js";
 import {
   loadStats, saveStats, getStats, accuracy, favoriteWeapon,
@@ -89,7 +93,7 @@ initAudio(loadAudioMuted() ?? false);
 loadStats();
 
 // —— 游戏状态机 ——
-const STATE = { MENU: "menu", PLAYING: "playing", PAUSED: "paused", ROUND_OVER: "round_over", MATCH_OVER: "match_over" };
+const STATE = { MENU: "menu", PLAYING: "playing", PAUSED: "paused", ROUND_OVER: "round_over", MATCH_OVER: "match_over", LEVEL_OVER: "level_over" };
 let state = STATE.MENU;
 
 // —— 对局状态 ——
@@ -114,11 +118,21 @@ let matchStatsBase = null;     // 本场统计基线（startMatch 快照，横�
 let introTimer = 0;            // 回合开场倒计时（秒）：>0 时双方全冻结（含 AI 决策）
 let goTimer = 0;               // "GO!" 余像计时（解冻后纯视觉）
 let slowmoTimer = 0;           // 击杀慢动作剩余（真实秒）：>0 时游戏 dt × SLOWMO.scale
+let pendingLevelSlowmo = false; // 关卡模式：本帧有击杀，胜负段确认终局后才转正为慢镜
+
+// —— 挑战关卡模式状态 ——
+let currentLevelIndex = 0;     // 当前在打第几关（LEVELS 下标）
+let challengeProgress = normalizeProgress(loadChallengeProgress() ?? 0); // 已通关数
+let levelTimer = 0;            // 关卡计时：survive 累加 / eliminateTimed 倒数（游戏秒）
+let levelWallBreak = false;    // 本关地形破坏开关（关卡表指定，覆写全局）
+let levelOutcome = null;       // LEVEL_OVER 时 "win" | "lose"
 let aiLevel = "normal";        // 选中的 AI 难度档（菜单 chip 单选），开局/R 重开沿用
 // 启用的道具类型集合（菜单多选 chip；空集=整局无道具）。
 // 初始从 localStorage 读上次组合，没存过默认全启;变化即写盘。
 let enabledPowerups = new Set(loadEnabledPowerups() ?? POWERUP.types);
 let wallBreakEnabled = loadWallBreak() ?? true; // 地雷炸墙开关（菜单「地形」chip，默认开）
+// 本局实际生效的地形破坏（关卡模式由关卡表覆写，不动全局设置）
+const wallBreakActive = () => (currentMode === "challenge" ? levelWallBreak : wallBreakEnabled);
 let showHelp = false;          // 玩法说明浮窗是否显示（叠在菜单上的浮层）
 
 // —— 键位设置面板状态（菜单子状态）——
@@ -126,6 +140,8 @@ let showHelp = false;          // 玩法说明浮窗是否显示（叠在菜单�
 const rebind = { open: false, capturing: null, conflictMsg: "", msgTimer: 0 };
 // 设置浮层开关（命名带 Panel 避免与 settings.js 的导入混淆）
 const settingsPanel = { open: false };
+// 关卡选择浮层开关
+const levelSelect = { open: false };
 const RESERVED_KEYS = ["Escape", "F11"]; // 系统语义键，禁止绑定（Esc=暂停/取消，F11=全屏）
 
 // 开发自检钩子（CDP 驱动验证用，见 CLAUDE.md「开发自检」）：
@@ -141,6 +157,9 @@ window.__devHook = {
   introLeft: () => introTimer,
   slowmoLeft: () => slowmoTimer,
   statsSnapshot: () => JSON.parse(JSON.stringify(getStats())),
+  levelState: () => ({ index: currentLevelIndex, progress: challengeProgress, outcome: levelOutcome, timer: levelTimer }),
+  forceUnlock: (n) => { challengeProgress = normalizeProgress(n); saveChallengeProgress(challengeProgress); },
+  winLevel: () => { for (const p of players.slice(1)) p.tank.alive = false; }, // 歼灭关直接过
   blastAt: (x, y) => {
     // 直接触发一次炸墙结算（跳过地雷实体，专测破墙链路：几何/特效/音效/开关）
     if (!maze || !wallBreakEnabled) return 0;
@@ -164,17 +183,25 @@ function startMatch(mode) {
 
 // 开一局：按模式从档位池随机抽一档地图，生成随机布局与玩家。
 // 缩放偏移由 fitArena 算（小图原样、大图等比缩小并居中），每回合重抽换图。
+// challenge 模式：地图/敌人/道具/地形全部由关卡表确定性指定（不随机）。
 function setupRound(mode) {
   currentMode = mode;
 
-  // 从该模式的档位池随机抽一档（pvp/pve → small|medium）
-  const pool = TIER_POOL_BY_MODE[mode] || TIER_POOL_BY_MODE.pvp;
-  const tier = pool[Math.floor(Math.random() * pool.length)];
-  const { cols, rows } = MAZE_TIERS[tier];
-  // 风格与档位正交，各自随机抽（每回合换图+换风格，重复感立减）
-  const stylePool = STYLE_POOL_BY_MODE[mode] || STYLE_POOL_BY_MODE.pvp;
-  const style = stylePool[Math.floor(Math.random() * stylePool.length)];
-  maze = generateMaze(cols, rows, style);
+  let cols, rows;
+  const level = mode === "challenge" ? LEVELS[currentLevelIndex] : null;
+  if (level) {
+    ({ cols, rows } = MAZE_TIERS[level.map.tier]);
+    maze = generateMaze(cols, rows, level.map.style);
+  } else {
+    // 从该模式的档位池随机抽一档（pvp/pve → small|medium）
+    const pool = TIER_POOL_BY_MODE[mode] || TIER_POOL_BY_MODE.pvp;
+    const tier = pool[Math.floor(Math.random() * pool.length)];
+    ({ cols, rows } = MAZE_TIERS[tier]);
+    // 风格与档位正交，各自随机抽（每回合换图+换风格，重复感立减）
+    const stylePool = STYLE_POOL_BY_MODE[mode] || STYLE_POOL_BY_MODE.pvp;
+    const style = stylePool[Math.floor(Math.random() * stylePool.length)];
+    maze = generateMaze(cols, rows, style);
+  }
 
   // 自适应缩放 + 居中：把竞技场世界尺寸喂给 fitArena
   const fit = fitArena(cols * CELL_SIZE, rows * CELL_SIZE);
@@ -183,29 +210,53 @@ function setupRound(mode) {
   offsetY = fit.offsetY;
 
   const half = CELL_SIZE / 2;
-  // P1 左上角格朝右，P2 右下角格朝左，初始背对，给彼此反应空间。
-  // pve 模式 P2 是 AI：keys=null + isAI=true，Player 内建 AiController。
-  const p2IsAI = mode === "pve";
-  players = [
-    new Player(0, PLAYER_COLORS[0], KEY_BINDINGS[0], half, half, 0),
-    new Player(
-      1, PLAYER_COLORS[1], p2IsAI ? null : KEY_BINDINGS[1],
-      (cols - 1) * CELL_SIZE + half,
-      (rows - 1) * CELL_SIZE + half,
-      Math.PI,
-      p2IsAI,
-      aiLevel
-    ),
-  ];
+  // 四角出生位（tl 恒给玩家；关卡表 enemies[].spawn 取其余三角）
+  const corner = {
+    tl: { x: half, y: half, a: 0 },
+    tr: { x: (cols - 1) * CELL_SIZE + half, y: half, a: Math.PI },
+    bl: { x: half, y: (rows - 1) * CELL_SIZE + half, a: 0 },
+    br: { x: (cols - 1) * CELL_SIZE + half, y: (rows - 1) * CELL_SIZE + half, a: Math.PI },
+  };
+
+  if (level) {
+    // 关卡模式：玩家 tl + 按表生成 n 个 AI 敌人
+    players = [new Player(0, PLAYER_COLORS[0], KEY_BINDINGS[0], corner.tl.x, corner.tl.y, 0)];
+    level.enemies.forEach((e, i) => {
+      const c = corner[e.spawn] || corner.br;
+      players.push(new Player(i + 1, PLAYER_COLORS[(i + 1) % PLAYER_COLORS.length],
+        null, c.x, c.y, c.a, true, e.level));
+    });
+    // 玩家开局强化
+    const pc = level.player || {};
+    const pt = players[0].tank;
+    if (pc.weapon === "laser") pt.laserShots = pc.shots ?? 1;
+    else if (pc.weapon === "scatter") pt.scatterShots = pc.shots ?? 3;
+    else if (pc.weapon === "mine") pt.mineCharges = pc.shots ?? 2;
+    if (pc.shield) pt.applyPowerup("shield");
+    spawner = new PowerupSpawner([...level.powerups]);
+    levelWallBreak = !!level.wallBreak; // 关卡覆写，不动全局设置
+    // 关卡计时：survive 从 0 数上去；eliminateTimed 从上限倒数；其余不用
+    levelTimer = level.objective === "eliminateTimed" ? level.mutators.timeLimit : 0;
+  } else {
+    // P1 左上角格朝右，P2 右下角格朝左，初始背对，给彼此反应空间。
+    // pve 模式 P2 是 AI：keys=null + isAI=true，Player 内建 AiController。
+    const p2IsAI = mode === "pve";
+    players = [
+      new Player(0, PLAYER_COLORS[0], KEY_BINDINGS[0], corner.tl.x, corner.tl.y, 0),
+      new Player(1, PLAYER_COLORS[1], p2IsAI ? null : KEY_BINDINGS[1],
+        corner.br.x, corner.br.y, Math.PI, p2IsAI, aiLevel),
+    ];
+    // 道具刷新器：只喂启用的类型（保持 POWERUP.types 定义顺序），
+    // 全没启用则传空数组，整局永不刷（spawner 内部 types 为空直接 return）
+    spawner = new PowerupSpawner(POWERUP.types.filter((t) => enabledPowerups.has(t)));
+  }
 
   bullets = [];
   effects = [];
   powerups = [];
   mines = [];
-  // 道具刷新器：只喂启用的类型（保持 POWERUP.types 定义顺序），
-  // 全没启用则传空数组，整局永不刷（spawner 内部 types 为空直接 return）
-  spawner = new PowerupSpawner(POWERUP.types.filter((t) => enabledPowerups.has(t)));
   winner = null;
+  pendingLevelSlowmo = false;
   introTimer = ROUND_INTRO.beat * 3; // 3-2-1 三拍冻结开场
   goTimer = 0;
   playSfx("countTick"); // 第一拍「3」（后续换拍音在 updatePlaying 的门里）
@@ -244,6 +295,9 @@ function update(dt) {
     case STATE.MATCH_OVER:
       updateMatchOver(dt);
       break;
+    case STATE.LEVEL_OVER:
+      updateLevelOver(dt);
+      break;
   }
   endFrame();
 }
@@ -257,6 +311,10 @@ function updateMenu(dt) {
   }
   if (settingsPanel.open) {
     updateSettingsPanel();
+    return;
+  }
+  if (levelSelect.open) {
+    updateLevelSelect();
     return;
   }
 
@@ -275,11 +333,34 @@ function updateMenu(dt) {
     case "openSettings":
       settingsPanel.open = true;
       break;
+    case "openLevelSelect":
+      levelSelect.open = true;
+      break;
     case "mode":
       startMatch(action.mode);
       break;
   }
   playSfx("uiClick");
+}
+
+// 关卡选择浮层：点已解锁关卡开局；Esc/面板外关闭
+function updateLevelSelect() {
+  if (isJustPressed("Escape")) {
+    levelSelect.open = false;
+    return;
+  }
+  if (!isClicked()) return;
+  const { x: mx, y: my } = getMousePos();
+  const action = levelSelectAction(mx, my, challengeProgress);
+  if (!action) return;
+  playSfx("uiClick");
+  if (action.type === "startLevel") {
+    levelSelect.open = false;
+    currentLevelIndex = action.index;
+    setupRound("challenge");
+  } else if (action.type === "close") {
+    levelSelect.open = false;
+  }
 }
 
 // 设置浮层：难度/道具/地形/音效 chip 与键位面板入口（阶段 19 从主菜单收纳）。
@@ -399,6 +480,31 @@ function findBindingConflict(code) {
   return null;
 }
 
+// 统一命中结算（阶段 23 抽出）：有盾消盾、无盾击杀——子弹/散射/激光/地雷共用。
+// weapon 用于统计归类；killerTank 用于排除自伤统计。慢动作与统计的
+// 模式分流集中在这一处（关卡模式多敌人：非终局击杀不慢镜、不进终身统计）。
+// 返回 true=击杀成功，false=被盾挡下。
+function hitPlayer(p, weapon, killerTank) {
+  const killerIndex = players.findIndex((pp) => pp.tank === killerTank);
+  if (p.tank.shield) {
+    p.tank.shield = false;
+    p.tank.shieldTimer = 0;
+    effects.push(new ShieldBreak(p.tank.x, p.tank.y, THEME.shieldRing));
+    addShake(3, 0.2);
+    playSfx("shieldBreak");
+    if (currentMode !== "challenge" && killerIndex >= 0 && killerTank !== p.tank) recordHit(killerIndex);
+    return false;
+  }
+  p.tank.alive = false;
+  effects.push(new TankExplosion(p.tank.x, p.tank.y, p.color));
+  addShake(5, 0.3);
+  playSfx("kill");
+  if (currentMode !== "challenge") slowmoTimer = SLOWMO.duration; // 1v1 任何击杀=终杀
+  else pendingLevelSlowmo = true; // 关卡模式：是否终局由胜负段确认后再慢镜
+  if (currentMode !== "challenge" && killerIndex >= 0 && killerTank !== p.tank) recordKill(killerIndex, weapon);
+  return true;
+}
+
 function updatePlaying(dt) {
   // 0) 对战中按 Esc 进入暂停（不弃局）。暂停菜单提供「继续 / 返回主菜单」。
   //    联机 v2 这里要改成「投降/确认退出」语义，避免一人退局带走别人的对战。
@@ -485,7 +591,7 @@ function updatePlaying(dt) {
     effects.push(new MineBlast(m.x, m.y));
     addShake(6, 0.35);
     playSfx("mineBlast");
-    if (wallBreakEnabled) {
+    if (wallBreakActive()) {
       // 炸墙：波及圈内内墙被炸碎（walls/cells 原子同步，AI 下次重规划自动感知）
       const broken = destroyWallsInRadius(maze, m.x, m.y, POWERUP.mine.wallBlastRadius);
       for (const w of broken) effects.push(new WallBreak(w.x1, w.y1, w.x2, w.y2));
@@ -494,19 +600,7 @@ function updatePlaying(dt) {
     for (const p of players) {
       if (!p.alive) continue;
       if (Math.hypot(p.tank.x - m.x, p.tank.y - m.y) >= POWERUP.mine.blastRadius) continue;
-      if (p.tank.shield) {
-        p.tank.shield = false;
-        p.tank.shieldTimer = 0;
-        effects.push(new ShieldBreak(p.tank.x, p.tank.y, THEME.shieldRing));
-        playSfx("shieldBreak");
-        if (m.owner !== p.tank) recordHit(players.findIndex(pp => pp.tank === m.owner));
-      } else {
-        p.tank.alive = false;
-        effects.push(new TankExplosion(p.tank.x, p.tank.y, p.color));
-        playSfx("kill");
-        slowmoTimer = SLOWMO.duration; // 1v1 任何击杀=终杀，慢镜
-        if (m.owner !== p.tank) recordKill(players.findIndex(pp => pp.tank === m.owner), "mine");
-      }
+      hitPlayer(p, "mine", m.owner);
     }
   }
   mines = mines.filter((m) => !m.exploded);
@@ -519,11 +613,12 @@ function updatePlaying(dt) {
     if (res.bullets.length > 0) {
       effects.push(new MuzzleFlash(res.bullets[0].x, res.bullets[0].y, players[i].tank.angle));
       playSfx(res.bullets.length > 1 ? "shootScatter" : "shoot"); // 散射一炮一个音
-      recordFired(i, res.bullets.length); // 命中率分母按实际弹数（散射 3 发计 3）
+      // 关卡模式不进终身统计（stats.players 定长 2，第三车会越界；口径也不同）
+      if (currentMode !== "challenge") recordFired(i, res.bullets.length);
     }
     for (const b of res.bullets) bullets.push(b); // kind 已由 tank.spawnBullet 打好
     if (res.laser) {
-      recordFired(i, 1);
+      if (currentMode !== "challenge") recordFired(i, 1);
       fireLaser(res.laser, players[i]); // 补传射手，击杀归属统计
     }
 
@@ -537,9 +632,9 @@ function updatePlaying(dt) {
   // 4) 子弹更新（移动 + 反弹 + 磨墙）。开关开着时每次反弹削内墙 1 点耐久，
   //    归零的墙这里统一删除（walls/cells 原子同步）——不在 bullet 遍历中删。
   for (const b of bullets) {
-    b.update(dt, maze.walls, wallBreakEnabled);
+    b.update(dt, maze.walls, wallBreakActive());
   }
-  if (wallBreakEnabled) {
+  if (wallBreakActive()) {
     const crumbled = maze.walls.filter((w) => !w.border && w.hp <= 0);
     if (crumbled.length) {
       destroyWallSegments(maze, crumbled);
@@ -555,26 +650,9 @@ function updatePlaying(dt) {
       if (!p.alive) continue;
       if (!b.canHit(p.tank)) continue;
       if (circleVsCircle(b.x, b.y, BULLET.radius, p.tank.x, p.tank.y, TANK.radius)) {
-        if (p.tank.shield) {
-          // 护盾挡一发即碎：消耗护盾、子弹消失、播破盾特效 + 小震动。
-          // 「挡一次」与「限时消失」（tank.update 计时器）两条路先到先算。
-          p.tank.shield = false;
-          p.tank.shieldTimer = 0;
-          b.dead = true;
-          effects.push(new ShieldBreak(p.tank.x, p.tank.y, THEME.shieldRing));
-          addShake(3, 0.2);
-          playSfx("shieldBreak");
-          if (b.owner !== p.tank) recordHit(players.findIndex(pp => pp.tank === b.owner));
-        } else {
-          b.dead = true;
-          p.tank.alive = false;
-          // 死亡演出：烟团 + 碎片四散 + 屏幕震动（纯表现，不影响逻辑）
-          effects.push(new TankExplosion(p.tank.x, p.tank.y, p.color));
-          addShake(5, 0.3);
-          playSfx("kill");
-          slowmoTimer = SLOWMO.duration;
-          if (b.owner !== p.tank) recordKill(players.findIndex(pp => pp.tank === b.owner), b.kind || "bullet");
-        }
+        // 护盾挡一发即碎 / 无盾即死——统一走 hitPlayer；子弹两种结局都消失
+        b.dead = true;
+        hitPlayer(p, b.kind || "bullet", b.owner);
         break; // 一颗子弹只打一个
       }
     }
@@ -585,7 +663,35 @@ function updatePlaying(dt) {
   for (const pw of powerups) pw.update(dt);
   updateEffects(dt);
 
-  // 7) 胜负判定：存活 ≤1 转结算
+  // 7) 胜负判定
+  if (currentMode === "challenge") {
+    // 关卡模式：目标判定（1v2 下「存活≤1」语义错误——玩家死后 AI 会互殴）。
+    // 关卡计时推进：survive 累加、eliminateTimed 倒数（用游戏时间，慢镜时同步慢——公平）
+    const level = LEVELS[currentLevelIndex];
+    if (level.objective === "survive") levelTimer += dt;
+    else if (level.objective === "eliminateTimed") levelTimer = Math.max(0, levelTimer - dt);
+    const outcome = evaluateObjective(level, {
+      playerAlive: players[0].alive,
+      enemiesAlive: players.filter((p, i) => i > 0 && p.alive).length,
+      levelTimer,
+    });
+    if (pendingLevelSlowmo) {
+      if (outcome) slowmoTimer = SLOWMO.duration; // 终局击杀才慢镜
+      pendingLevelSlowmo = false;
+    }
+    if (outcome) {
+      levelOutcome = outcome;
+      if (outcome === "win" && currentLevelIndex + 1 > challengeProgress) {
+        challengeProgress = currentLevelIndex + 1; // 首次通过，解锁下一关
+        saveChallengeProgress(challengeProgress);
+      }
+      state = STATE.LEVEL_OVER;
+      playSfx(outcome === "win" ? "matchWin" : "roundDraw");
+    }
+    return;
+  }
+
+  // pvp/pve：存活 ≤1 转结算
   const alivePlayers = players.filter((p) => p.alive);
   if (alivePlayers.length <= 1) {
     winner = alivePlayers.length === 1 ? alivePlayers[0] : null;
@@ -636,23 +742,8 @@ function fireLaser(origin, shooter = null) {
       // 截断路径到命中点（后续段不再判定：射线被目标吸收）
       pts = pts.slice(0, i + 1);
       pts.push({ x: hit.x, y: hit.y });
-      const tank = hit.p.tank;
-      if (tank.shield) {
-        // 护盾挡激光：消盾 + 破盾特效，射线止于盾（与子弹挡盾语义一致）
-        tank.shield = false;
-        tank.shieldTimer = 0;
-        effects.push(new ShieldBreak(tank.x, tank.y, THEME.shieldRing));
-        addShake(3, 0.2);
-        playSfx("shieldBreak");
-        if (shooter && shooter !== hit.p) recordHit(shooter.index);
-      } else {
-        tank.alive = false;
-        effects.push(new TankExplosion(tank.x, tank.y, hit.p.color));
-        addShake(5, 0.3);
-        playSfx("kill");
-        slowmoTimer = SLOWMO.duration;
-        if (shooter && shooter !== hit.p) recordKill(shooter.index, "laser");
-      }
+      // 护盾挡激光（射线止于盾）/ 无盾即死——统一走 hitPlayer
+      hitPlayer(hit.p, "laser", shooter ? shooter.tank : null);
       break;
     }
   }
@@ -710,6 +801,31 @@ function updateMatchOver(dt) {
   else if (choice === "menu") state = STATE.MENU;
 }
 
+// 关卡结算：无自动倒计时，等玩家选（胜：下一关/重打/菜单；败：重试/菜单）。
+// R = 重试当前关；胜利且有下一关时 N/点按钮进下一关。
+function updateLevelOver(dt) {
+  updateEffects(dt);
+
+  const hasNext = levelOutcome === "win" && currentLevelIndex + 1 < LEVEL_COUNT;
+  let choice = null;
+  if (isJustPressed("KeyR")) choice = "retry";
+  else if (isJustPressed("Escape")) choice = "menu";
+  else if (isClicked()) {
+    choice = levelOverAction(getMousePos().x, getMousePos().y, { win: levelOutcome === "win", hasNext });
+    if (choice) playSfx("uiClick");
+  }
+
+  if (choice === "next" && hasNext) {
+    currentLevelIndex++;
+    setupRound("challenge");
+  } else if (choice === "retry") {
+    setupRound("challenge");
+  } else if (choice === "menu") {
+    state = STATE.MENU;
+    levelSelect.open = true; // 回到选关面板（延续闯关心流）
+  }
+}
+
 // 推进所有特效 + 屏幕震动，播完的移除。PLAYING 与 ROUND_OVER 共用。
 function updateEffects(dt) {
   updateShake(dt);
@@ -744,6 +860,9 @@ function render() {
           })(),
         });
       }
+      if (levelSelect.open) {
+        renderLevelSelectOverlay(ctx, { mouse: getMousePos(), progress: challengeProgress });
+      }
       if (rebind.open) {
         renderRebindOverlay(ctx, {
           mouse: getMousePos(),
@@ -777,6 +896,15 @@ function render() {
               return fired > 0 ? (p.hits - matchStatsBase[i].hits) / fired : null;
             })
           : [null, null],
+      });
+      break;
+    case STATE.LEVEL_OVER:
+      renderArena();
+      renderLevelOverBanner(ctx, {
+        win: levelOutcome === "win",
+        level: LEVELS[currentLevelIndex],
+        hasNext: levelOutcome === "win" && currentLevelIndex + 1 < LEVEL_COUNT,
+        mouse: getMousePos(),
       });
       break;
   }
@@ -835,7 +963,17 @@ function renderArena() {
 
   ctx.restore();
 
-  renderHud(ctx, { players, matchScores, isPlaying: state === STATE.PLAYING });
+  renderHud(ctx, {
+    players, matchScores, isPlaying: state === STATE.PLAYING,
+    // 关卡模式右侧改聚合显示（第 N 关/剩余敌人/限时），不走双人比分布局
+    challenge: currentMode === "challenge" ? {
+      levelId: LEVELS[currentLevelIndex].id,
+      enemiesAlive: players.filter((p, i) => i > 0 && p.alive).length,
+      timer: LEVELS[currentLevelIndex].objective === "survive"
+        ? Math.max(0, (LEVELS[currentLevelIndex].mutators.surviveTime ?? 0) - levelTimer)
+        : (LEVELS[currentLevelIndex].objective === "eliminateTimed" ? levelTimer : null),
+    } : null,
+  });
 }
 
 requestAnimationFrame(loop);

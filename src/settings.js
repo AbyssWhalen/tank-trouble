@@ -14,7 +14,8 @@
 //     bindings: [{forward,back,left,right,fire,special} × 2],
 //     powerups: ["scatter", ...],  // 菜单启用的道具类型
 //     audio: { muted: false },     // 音效静音开关
-//     wallBreak: true              // 地雷炸墙开关（菜单「地形」chip）
+//     wallBreak: true,             // 地雷炸墙开关（菜单「地形」chip）
+//     challenge: 0                 // 挑战模式已通关数（0=从头开始）
 //   }
 // ============================================================
 
@@ -113,4 +114,16 @@ export function loadWallBreak() {
 // 炸墙开关切换时写盘
 export function saveWallBreak(v) {
   writeStore({ wallBreak: !!v });
+}
+
+// 读挑战模式进度（已通关数）：没存过/非法返回 null（调用方落 0）
+export function loadChallengeProgress() {
+  const data = readStore();
+  if (!data || typeof data.challenge !== "number") return null;
+  return data.challenge;
+}
+
+// 过关时写盘
+export function saveChallengeProgress(n) {
+  writeStore({ challenge: n });
 }
