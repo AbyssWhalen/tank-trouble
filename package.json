@@ -1,6 +1,6 @@
 {
   "name": "tank-trouble",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "本地多人 + 人机对战的坦克回廊对战小游戏",
   "main": "electron/main.cjs",
   "scripts": {
