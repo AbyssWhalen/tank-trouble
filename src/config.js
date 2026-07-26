@@ -244,7 +244,21 @@ export const POWERUP = {
                           //   布雷位置靠记忆（原版同款设计）；隐形不影响引爆判定
     holdTimeout: 10,      // 持雷超时（秒）：拾取后一直不部署则存货作废（防捏着白占
                           //   武器槽），每次成功部署刷新计时
+    wallBlastRadius: 60,  // 炸墙半径（圆心距，与 blastRadius 同值起步）：圈内内墙被炸碎
+                          //   （外墙 border 永不破）；菜单「墙体破坏」开关可整体关闭
   },
+};
+
+// 墙碎裂特效（地雷炸墙）：沿被炸墙段撒碎片，比坦克爆炸更小更快更干脆。
+// 独立于 EXPLOSION——坦克爆炸手感已调好不动它。
+export const WALL_BREAK = {
+  duration: 0.5,          // 总时长（秒）
+  shardPerSeg: [5, 8],    // 每段墙的碎片数量随机区间
+  shardSpeed: [40, 140],  // 碎片初速（沿墙法线 ± 随机散布）
+  shardSize: [3, 7],      // 碎片外接半径
+  shardDrag: 4.0,         // 线性阻尼（比坦克碎片停得更快）
+  shardSpin: 8,           // 最大自旋角速度
+  fadeStart: 0.4,         // 进度超此比例后整体淡出
 };
 
 // ============================================================
@@ -298,6 +312,11 @@ export const SFX = {
   mineBlast: [
     { type: "noise", dur: 0.7, gain: 0.6, filter: { kind: "lowpass", freq: [2500, 120] } },
     { type: "tone", wave: "sine", freq: [120, 35], dur: 0.6, gain: 0.55 },
+  ],
+  // 墙被炸碎：高频碎裂补充层（同帧必有 mineBlast 轰底，这里只补"石屑"质感）
+  wallBreak: [
+    { type: "noise", dur: 0.22, gain: 0.22, filter: { kind: "highpass", freq: [1500, 3000] } },
+    { type: "tone", wave: "triangle", freq: [900, 300], dur: 0.15, gain: 0.12 },
   ],
   // 回合胜利：C5-E5-G5 上行琶音
   roundWin: [

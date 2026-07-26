@@ -13,7 +13,8 @@
 //     version: 1,
 //     bindings: [{forward,back,left,right,fire,special} × 2],
 //     powerups: ["scatter", ...],  // 菜单启用的道具类型
-//     audio: { muted: false }      // 音效静音开关
+//     audio: { muted: false },     // 音效静音开关
+//     wallBreak: true              // 地雷炸墙开关（菜单「地形」chip）
 //   }
 // ============================================================
 
@@ -100,4 +101,16 @@ export function loadAudioMuted() {
 // 静音开关切换时写盘
 export function saveAudioMuted(m) {
   writeStore({ audio: { muted: !!m } });
+}
+
+// 读地雷炸墙开关：没存过/非法返回 null（调用方落默认开启）
+export function loadWallBreak() {
+  const data = readStore();
+  if (!data || typeof data.wallBreak !== "boolean") return null;
+  return data.wallBreak;
+}
+
+// 炸墙开关切换时写盘
+export function saveWallBreak(v) {
+  writeStore({ wallBreak: !!v });
 }

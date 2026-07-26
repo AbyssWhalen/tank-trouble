@@ -16,6 +16,7 @@
 // ============================================================
 
 import { CELL_SIZE, WALL_DENSITY } from "./config.js";
+import { closestPointOnSegment } from "./collision.js";
 
 // 四方向表：格间邻接 + 对应墙面名。maze 自用（泛洪/敲墙），ai.js 寻路也复用。
 export const DIRS = [
@@ -71,10 +72,47 @@ export function generateMaze(cols, rows) {
   return { cols, rows, cells, walls, cellSize: CELL_SIZE };
 }
 
-// 拆掉两相邻格之间的墙
-function knockWall(cells, c, r, d) {
+// 拆掉两相邻格之间的墙（cells 侧的原子操作：同时清共享墙的两个面）。
+// 生成期的连通修复与运行期的破坏机制共用。
+export function knockWall(cells, c, r, d) {
   cells[r][c][d.wall] = false;
   cells[r + d.dr][c + d.dc][d.opposite] = false;
+}
+
+// —— 运行期破墙（阶段 17：地雷炸墙）——
+// 炸掉爆心 radius 内的全部内墙段，返回被炸掉的墙段数组（供特效/音效）。
+// 双数据源原子同步：walls（物理/渲染消费）与 cells（AI BFS 消费）一起改，
+// 否则会出现「看不见的墙」或「AI 不走破洞」。border 外墙永不破——
+// 这是 border 标记预留至今的第一个消费方。
+// 距离语义与地雷波及坦克一致：线段最近点圆心距，隔墙也炸。
+// 删墙只会让连通性更好，无需重跑 ensureConnected。
+// 注意：此函数整体替换 maze.walls 数组（filter 换新），必须在墙遍历之外调用
+// （地雷结算处满足）；smoke 夹具 cells 可为 null，此时跳过 cells 同步。
+export function destroyWallsInRadius(maze, cx, cy, radius) {
+  const S = maze.cellSize || CELL_SIZE;
+  const destroyed = [];
+
+  for (const w of maze.walls) {
+    if (w.border) continue;
+    const cp = closestPointOnSegment(cx, cy, w.x1, w.y1, w.x2, w.y2);
+    if (Math.hypot(cx - cp.x, cy - cp.y) >= radius) continue;
+
+    w.destroyed = true;
+    destroyed.push(w);
+
+    // cells 侧同步：内墙段只可能是某格的 top（横墙）或 left（竖墙）——
+    // buildWallSegments 里 right/bottom 特例只出现在最后一列/行，那些全是 border。
+    if (maze.cells) {
+      const c = Math.round(w.x1 / S);
+      const r = Math.round(w.y1 / S);
+      const horizontal = w.y1 === w.y2;
+      const d = DIRS.find((dd) => dd.wall === (horizontal ? "top" : "left"));
+      knockWall(maze.cells, c, r, d);
+    }
+  }
+
+  if (destroyed.length) maze.walls = maze.walls.filter((w) => !w.destroyed);
+  return destroyed;
 }
 
 // 从 (0,0) 泛洪，标记所有可达格

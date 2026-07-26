@@ -20,11 +20,11 @@ import {
   POWERUP, PICKUP_RATE, MATCH_TARGET,
 } from "./config.js";
 import { Player } from "./player.js";
-import { generateMaze } from "./maze.js";
+import { generateMaze, destroyWallsInRadius } from "./maze.js";
 import { circleVsCircle, separateCircles, resolveCircleWalls, closestPointOnSegment } from "./collision.js";
 import { fitArena } from "./layout.js";
 import {
-  TankExplosion, PickupFlash, ShieldBreak, MuzzleFlash, MineBlast,
+  TankExplosion, PickupFlash, ShieldBreak, MuzzleFlash, MineBlast, WallBreak,
   addShake, updateShake, shakeOffset,
 } from "./effects.js";
 import { castLaserPath, LaserBeam, renderLaserPreview } from "./laser.js";
@@ -42,6 +42,7 @@ import {
   initSettings, saveBindings, resetBindings,
   loadEnabledPowerups, saveEnabledPowerups,
   loadAudioMuted, saveAudioMuted,
+  loadWallBreak, saveWallBreak,
 } from "./settings.js";
 import { initAudio, playSfx, toggleMuted, isMuted } from "./audio.js";
 
@@ -106,6 +107,7 @@ let aiLevel = "normal";        // 选中的 AI 难度档（菜单 chip 单选）
 // 启用的道具类型集合（菜单多选 chip；空集=整局无道具）。
 // 初始从 localStorage 读上次组合，没存过默认全启;变化即写盘。
 let enabledPowerups = new Set(loadEnabledPowerups() ?? POWERUP.types);
+let wallBreakEnabled = loadWallBreak() ?? true; // 地雷炸墙开关（菜单「地形」chip，默认开）
 let showHelp = false;          // 玩法说明浮窗是否显示（叠在菜单上的浮层）
 
 // —— 键位设置面板状态（菜单子状态）——
@@ -120,6 +122,15 @@ window.__devHook = {
   snapshot: () => ({ state, matchScores: [...matchScores], winnerIndex: winner ? winner.index : null }),
   forceScores: (a, b) => { matchScores = [a, b]; },
   setTank: (i, patch) => { if (players[i]) Object.assign(players[i].tank, patch); },
+  wallCount: () => (maze ? maze.walls.length : 0),
+  blastAt: (x, y) => {
+    // 直接触发一次炸墙结算（跳过地雷实体，专测破墙链路：几何/特效/音效/开关）
+    if (!maze || !wallBreakEnabled) return 0;
+    const broken = destroyWallsInRadius(maze, x, y, POWERUP.mine.wallBlastRadius);
+    for (const w of broken) effects.push(new WallBreak(w.x1, w.y1, w.x2, w.y2));
+    if (broken.length) playSfx("wallBreak");
+    return broken.length;
+  },
 };
 
 // 开一整场：从菜单进入时调用。清零累计分，再开第一回合。
@@ -239,6 +250,10 @@ function updateMenu(dt) {
       break;
     case "toggleMute":
       saveAudioMuted(toggleMuted());
+      break;
+    case "toggleWallBreak":
+      wallBreakEnabled = !wallBreakEnabled;
+      saveWallBreak(wallBreakEnabled);
       break;
     case "mode":
       startMatch(action.mode);
@@ -394,6 +409,12 @@ function updatePlaying(dt) {
     effects.push(new MineBlast(m.x, m.y));
     addShake(6, 0.35);
     playSfx("mineBlast");
+    if (wallBreakEnabled) {
+      // 炸墙：波及圈内内墙被炸碎（walls/cells 原子同步，AI 下次重规划自动感知）
+      const broken = destroyWallsInRadius(maze, m.x, m.y, POWERUP.mine.wallBlastRadius);
+      for (const w of broken) effects.push(new WallBreak(w.x1, w.y1, w.x2, w.y2));
+      if (broken.length) playSfx("wallBreak");
+    }
     for (const p of players) {
       if (!p.alive) continue;
       if (Math.hypot(p.tank.x - m.x, p.tank.y - m.y) >= POWERUP.mine.blastRadius) continue;
@@ -601,7 +622,7 @@ function render() {
 
   switch (state) {
     case STATE.MENU:
-      renderMenu(ctx, { mouse: getMousePos(), aiLevel, enabledPowerups, showHelp, muted: isMuted() });
+      renderMenu(ctx, { mouse: getMousePos(), aiLevel, enabledPowerups, showHelp, muted: isMuted(), wallBreakEnabled });
       if (rebind.open) {
         renderRebindOverlay(ctx, {
           mouse: getMousePos(),

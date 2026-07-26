@@ -16,6 +16,7 @@ Local multiplayer tank combat game with procedural maze generation, bullet ricoc
   - 护盾（挡一发即碎） | One-hit shield
   - 激光（瞬时射线沿墙反弹 + 预瞄虚线） | Bouncing laser with aim preview
   - 地雷（独立道具键布雷，布防后隐形） | Stealth mines on a dedicated key
+- 🧱 **可破坏地形** | Destructible terrain: mine blasts shatter inner walls (menu-toggleable)
 - 🤖 **三档难度 AI** | AI with Easy/Normal/Hard difficulty levels
   - 智能躲弹 + 拦截预判射击 | Adaptive dodging + predictive aim
   - 近战反打决策 | Close-combat counter-attack logic
@@ -145,6 +146,7 @@ Zero runtime dependencies, pure frontend implementation.
 - **阶段 14**：AI 激光预瞄线防守——消费全程弹道（含反弹段）绕线走位、压线即避；AI 对打竞技场收进仓库（npm run arena）
 - **阶段 15**：程序合成音效系统（Web Audio 零素材，12 类事件音 + 菜单静音开关持久化）+ v0.2.0 发布
 - **阶段 16**：HUD 武器/护盾徽章（剩余次数 + 到期闪烁）+ 局胜制（先到 5 分整场结算，可再来一场）
+- **阶段 17**：可破坏内墙——地雷爆炸炸碎波及圈内墙（外墙不破），地形随战斗演变；菜单「地形」开关
 
 ---
 

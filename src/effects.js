@@ -8,7 +8,7 @@
 // 联机 v2 直接复用：死亡有反馈而非凭空消失。
 // ============================================================
 
-import { EXPLOSION, THEME, TANK } from "./config.js";
+import { EXPLOSION, WALL_BREAK, WALL, THEME, TANK } from "./config.js";
 
 // ============================================================
 // 屏幕震动 —— 模块级单例（同时只有一段震动，新震动与旧震动取剩余强度大者）。
@@ -162,6 +162,84 @@ export class TankExplosion {
 
     ctx.restore();
     ctx.globalAlpha = 1; // 复位，别污染后续绘制
+  }
+}
+
+// ============================================================
+// WallBreak — 墙段被炸碎（地雷炸墙）：沿墙段撒墙色碎片，法线方向飞散。
+// TankExplosion 碎片系统的瘦身版：无烟团、更小更快更干脆。
+// ============================================================
+export class WallBreak {
+  // 传被炸墙段两端点（世界坐标）
+  constructor(x1, y1, x2, y2) {
+    this.age = 0;
+
+    // 墙段单位法线（横墙法线朝上下、竖墙朝左右，正负随机散布）
+    const dx = x2 - x1, dy = y2 - y1;
+    const len = Math.hypot(dx, dy) || 1;
+    const nx = -dy / len, ny = dx / len;
+
+    const count = Math.round(randRange(WALL_BREAK.shardPerSeg));
+    this.shards = [];
+    for (let i = 0; i < count; i++) {
+      const t = Math.random();               // 沿墙段随机取生成点
+      const side = Math.random() < 0.5 ? 1 : -1;
+      const speed = randRange(WALL_BREAK.shardSpeed);
+      const jitter = (Math.random() - 0.5) * 0.8; // 法线方向 ± 抖动
+      this.shards.push({
+        x: x1 + dx * t,
+        y: y1 + dy * t,
+        vx: (nx * side + (dx / len) * jitter) * speed,
+        vy: (ny * side + (dy / len) * jitter) * speed,
+        rot: Math.random() * Math.PI * 2,
+        spin: (Math.random() * 2 - 1) * WALL_BREAK.shardSpin,
+        shape: makeShardShape(randRange(WALL_BREAK.shardSize)),
+      });
+    }
+  }
+
+  get done() {
+    return this.age >= WALL_BREAK.duration;
+  }
+
+  update(dt) {
+    if (this.done) return;
+    this.age += dt;
+    const damp = Math.exp(-WALL_BREAK.shardDrag * dt);
+    for (const s of this.shards) {
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.vx *= damp;
+      s.vy *= damp;
+      s.rot += s.spin * dt;
+    }
+  }
+
+  render(ctx) {
+    if (this.done) return;
+    const progress = this.age / WALL_BREAK.duration;
+    const alpha = progress < WALL_BREAK.fadeStart
+      ? 1
+      : 1 - (progress - WALL_BREAK.fadeStart) / (1 - WALL_BREAK.fadeStart);
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = WALL.color; // 墙色碎片：看得出是墙的残骸
+    for (const s of this.shards) {
+      ctx.save();
+      ctx.translate(s.x, s.y);
+      ctx.rotate(s.rot);
+      ctx.beginPath();
+      ctx.moveTo(s.shape[0].x, s.shape[0].y);
+      for (let i = 1; i < s.shape.length; i++) {
+        ctx.lineTo(s.shape[i].x, s.shape[i].y);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
   }
 }
 

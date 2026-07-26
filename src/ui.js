@@ -46,6 +46,14 @@ const powupChips = POWERUP.types.map((key, i) => ({
   h: POW_CHIP_H,
 }));
 
+// —— 地形 chip（道具 chip 下方单枚居中，toggle：地雷炸墙开关）——
+const wallBreakChip = {
+  x: (CANVAS.width - POW_CHIP_W) / 2,
+  y: 594, // 道具 chip 底边 576 再留 18px
+  w: POW_CHIP_W,
+  h: POW_CHIP_H,
+};
+
 // —— 玩法说明按钮（右下角圆形 "?" 按钮，点开浮窗）——
 const helpBtn = { x: CANVAS.width - 56, y: CANVAS.height - 56, r: 20 };
 
@@ -169,6 +177,7 @@ export function menuAction(mx, my, { showHelp }) {
   for (const c of powupChips) {
     if (hitRect(mx, my, c)) return { type: "togglePowerup", key: c.key };
   }
+  if (hitRect(mx, my, wallBreakChip)) return { type: "toggleWallBreak" };
   for (const b of buttons) {
     if (b.enabled && hitRect(mx, my, b)) return { type: "mode", mode: b.mode };
   }
@@ -288,6 +297,14 @@ export function renderMenu(ctx, view) {
     const hover = hitRect(mx, my, c);
     renderChip(ctx, c, c.label, selected, hover);
   }
+
+  // 地形 chip（单枚 toggle：地雷炸墙）
+  ctx.textAlign = "right";
+  ctx.fillStyle = THEME.textDim;
+  ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText("地形", wallBreakChip.x - 14, wallBreakChip.y + POW_CHIP_H / 2);
+  ctx.textAlign = "center";
+  renderChip(ctx, wallBreakChip, "炸墙", view.wallBreakEnabled, hitRect(mx, my, wallBreakChip));
 
   // 玩法说明按钮（右下角圆形 "?"）+ 键位设置按钮（左下角）+ 音效开关
   renderHelpButton(ctx, mx, my);
@@ -588,6 +605,7 @@ function renderHelpOverlay(ctx, cx) {
   line("散射：连续 3 次扇形开火（一炮 3 发）");
   line("激光：下一发开火变瞬时射线，沿墙反弹、命中即杀；红色虚线全程预示弹道");
   line("地雷：捡取后按道具键在车尾布雷（共 2 颗），1 秒布防后近敌即炸（不认主人）");
+  line("炸墙：地雷爆炸会炸碎波及圈内的内墙（外墙不破），可在菜单「地形」关闭");
   ly += 6;
 
   section("快捷键");

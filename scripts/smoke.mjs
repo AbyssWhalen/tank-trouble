@@ -12,7 +12,7 @@ import { Tank } from "../src/tank.js";
 import { Bullet } from "../src/bullet.js";
 import { Mine } from "../src/mine.js";
 import { castLaserPath } from "../src/laser.js";
-import { generateMaze } from "../src/maze.js";
+import { generateMaze, destroyWallsInRadius } from "../src/maze.js";
 import { AiController, findBounceShot } from "../src/ai.js";
 import { closestPointOnSegment } from "../src/collision.js";
 import { POWERUP, TANK, KEY_BINDINGS, BULLET, CELL_SIZE, SFX, PICKUP_RATE, MATCH_TARGET } from "../src/config.js";
@@ -403,16 +403,65 @@ for (const level of ["easy", "normal", "hard"]) {
 }
 
 // ============================================================
+section("可破坏墙 (destroyWallsInRadius)");
+{
+  // 手工造 2×2 迷宫：中间一堵竖内墙 (S,0)-(S,S)，外圈全 border。
+  // cells 与 walls 一致（walls/cells 双数据源必须成对维护的最小夹具）。
+  const S = CELL_SIZE;
+  const mkMaze = () => ({
+    cols: 2, rows: 2, cellSize: S,
+    cells: [
+      [{ top: true, left: true, bottom: false, right: true }, { top: true, left: true, bottom: false, right: true }],
+      [{ top: false, left: true, bottom: true, right: false }, { top: false, left: false, bottom: true, right: true }],
+    ],
+    walls: [
+      { x1: 0, y1: 0, x2: 2 * S, y2: 0, border: true },          // 上外墙（简化为一段）
+      { x1: 0, y1: 0, x2: 0, y2: 2 * S, border: true },          // 左外墙
+      { x1: S, y1: 0, x2: S, y2: S, border: false },             // 中间竖内墙：格(1,0)的 left
+    ],
+  });
+
+  {
+    // 爆心贴着内墙 → 内墙被删，cells 两侧面同步清掉
+    const mz = mkMaze();
+    const gone = destroyWallsInRadius(mz, S + 10, S * 0.5, 60);
+    check("内墙被炸掉（返回 1 段）", gone.length === 1 && gone[0].x1 === S && !gone[0].border);
+    check("walls 数组同步变短", mz.walls.length === 2);
+    check("cells 两侧面同步清除", mz.cells[0][1].left === false && mz.cells[0][0].right === false);
+  }
+  {
+    // 爆心在外墙上 → border 护栏：外墙不删
+    const mz = mkMaze();
+    const gone = destroyWallsInRadius(mz, 0, S, 60);
+    check("border 外墙在半径内也不删", gone.length === 0 && mz.walls.length === 3);
+  }
+  {
+    // 爆心远离一切 → 无事发生
+    const mz = mkMaze();
+    const gone = destroyWallsInRadius(mz, 2 * S - 10, 2 * S - 10, 40);
+    check("半径外内墙保留", gone.length === 0 && mz.walls.length === 3);
+  }
+  {
+    // cells: null 夹具兼容（arena/smoke 有些夹具不带 cells）
+    const mz = mkMaze();
+    mz.cells = null;
+    let ok = true;
+    try { destroyWallsInRadius(mz, S + 10, S * 0.5, 60); } catch { ok = false; }
+    check("cells 为 null 不抛异常", ok && mz.walls.length === 2);
+  }
+}
+
+// ============================================================
 section("音效 spec 表 (SFX/PICKUP_RATE)");
 {
   // audio.js 是浏览器专属（Web Audio），smoke 只验 config 里的纯数据表：
   // 事件齐全 + 每层参数在合法区间，接线正确性靠 npm start 实听。
   const expected = [
     "shoot", "shootScatter", "laser", "kill", "shieldBreak", "pickup",
-    "mineDeploy", "mineBlast", "roundWin", "matchWin", "roundDraw", "uiClick", "uiError",
+    "mineDeploy", "mineBlast", "wallBreak", "roundWin", "matchWin", "roundDraw", "uiClick", "uiError",
   ];
   const names = Object.keys(SFX);
-  check("13 个事件名双向齐全",
+  check("14 个事件名双向齐全",
     expected.every((n) => names.includes(n)) && names.every((n) => expected.includes(n)),
     `实有 ${names.length} 个`);
 

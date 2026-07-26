@@ -18,7 +18,7 @@
 
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { generateMaze } from "../src/maze.js";
+import { generateMaze, destroyWallsInRadius } from "../src/maze.js";
 import { Tank } from "../src/tank.js";
 import { PowerupSpawner } from "../src/powerup.js";
 import { castLaserPath } from "../src/laser.js";
@@ -161,6 +161,8 @@ function playRound(sideAFirst) {
         if (Math.hypot(p.tank.x - m.x, p.tank.y - m.y) >= POWERUP.mine.blastRadius) continue;
         kill(p.tank, "mine");
       }
+      // 炸墙（与 main 同步：walls/cells 原子删除；arena 默认开启，调参基准含新机制）
+      destroyWallsInRadius(maze, m.x, m.y, POWERUP.mine.wallBlastRadius);
     }
     mines = mines.filter((m) => !m.exploded);
 
