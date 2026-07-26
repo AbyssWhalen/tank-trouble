@@ -50,9 +50,25 @@ function cellCenter(cell) {
   return { x: (cell.c + 0.5) * CELL_SIZE, y: (cell.r + 0.5) * CELL_SIZE };
 }
 
-// 自己中心到敌人中心的连线是否不被任何墙挡（中心连线近似，够基础 AI 用）
+// 自己中心到敌人中心的连线是否不被任何墙挡。
+// ⚠️ 这是零宽射线——只适合【射击判定】（子弹 r=3 近似成立）。
+// 【导航判定】必须用 hasClearPath：墙自由端附近有 ~车身半径宽的
+// 「射线通、车身不通」泄漏带，用错会导致 AI 顶墙硬挤（隔墙对撞根因）。
 function hasLineOfSight(self, enemy, walls) {
   return !segmentHitsWalls(self.x, self.y, enemy.x, enemy.y, walls);
+}
+
+// 半径感知的通行判定（导航用）：中心线 + 垂直方向 ±r 的两条平行线，
+// 三线全通才认为车身能沿直线开过去。墙体破坏把连续墙打成墙桩后，
+// 自由端泄漏带暴涨，导航必须走这个版本。导出供冒烟测试。
+export function hasClearPath(x1, y1, x2, y2, walls, r = TANK.radius) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-6) return true;
+  const nx = (-dy / len) * r, ny = (dx / len) * r;
+  return !segmentHitsWalls(x1, y1, x2, y2, walls)
+    && !segmentHitsWalls(x1 + nx, y1 + ny, x2 + nx, y2 + ny, walls)
+    && !segmentHitsWalls(x1 - nx, y1 - ny, x2 - nx, y2 - ny, walls);
 }
 
 // 线段是否撞到任意墙（视线检测 / 闪避探路共用）
@@ -180,8 +196,10 @@ export function pickDodgeHeading(self, bullets, walls, horizon, hazards = []) {
     const tx = self.x + Math.cos(heading) * AI.dodgeClearance;
     const ty = self.y + Math.sin(heading) * AI.dodgeClearance;
 
-    // 朝墙航向重罚：罚值足够大，只有八方皆堵才会选到朝墙的（那就蹭墙滑）
-    if (segmentHitsWalls(self.x, self.y, tx, ty, walls)) {
+    // 朝墙航向重罚：罚值足够大，只有八方皆堵才会选到朝墙的（那就蹭墙滑）。
+    // 半径感知（中心线 + ±车身半径平行线）——零宽射线擦墙沿 8px 判"通"，
+    // 车身(r=16)实际过不去，闪避会原地打转
+    if (!hasClearPath(self.x, self.y, tx, ty, walls)) {
       score -= AI.dodgeWallPenalty;
     }
     // 扫过雷圈同罚：闪进雷区比挨子弹还亏
@@ -338,7 +356,8 @@ export class AiController {
     // —— 场上地雷 → 移动层障碍（躲弹罚分 / BFS 绕格 / 直追改道三处共用）——
     // 布防期的雷也一并避（马上就警戒了，没必要精确到帧）；雷不认人，
     // 自己丢的同样在列——丢完雷靠这套逻辑自动绕开，不会回头踩自己的雷。
-    const mineClear = POWERUP.mine.triggerRadius + TANK.radius * 0.5;
+    // 避让半径按爆炸波及圈算（别人踩雷自己也在圈内会陪葬），不是触发圈
+    const mineClear = POWERUP.mine.blastRadius + TANK.radius * 0.5;
     const mineHazards = (world.mines || []).map((m) => ({ x: m.x, y: m.y, r: mineClear }));
     const mineBlocked = mineHazards.length
       ? new Set(mineHazards.map((h) => `${Math.floor(h.x / CELL_SIZE)},${Math.floor(h.y / CELL_SIZE)}`))
@@ -446,18 +465,23 @@ export class AiController {
       : this.cfg.ammoBudget;
     let myShots = 0;
     for (const b of world.bullets) {
-      if (!b.dead && b.owner === self) myShots++;
+      // 散射弹不计入自留弹预算——它本就绕开 maxAlive 限流，计入会让 AI
+      // 打完一轮散射（+3 发在场）后 gunReady 骤降变消极，与道具意图相反
+      if (!b.dead && b.owner === self && b.kind !== "scatter") myShots++;
     }
     const gunReady = this.fireTimer <= 0 && myShots < ammoCap;
 
-    // 近战反打：贴脸 + 有视线 + 枪已就绪 → 压倒一切（中断躲避/脱困）转炮开火。
-    // 不设朝向门槛：躲弹时炮口本来就被闪避航向带偏，设了门槛就死锁在躲避态；
-    // 近距必中角大，转半圈也比闷头躲到死强。枪没就绪才专心躲弹等机会。
+    // 近战反打：贴脸 + 车身可达 + 枪已就绪 → 压倒一切转炮开火。
+    // 可达门用 hasClearPath 而非零宽 los：closeCombatRange(130) > CELL_SIZE(96)，
+    // 隔一堵墙的敌人恒在距离内——零宽射线在墙自由端有泄漏带，会让 AI 判
+    // "能打到"却物理过不去，顶着墙无限推（隔墙对撞根因）。车身过不去就
+    // 老老实实走 BFS 绕路，那边照样能开火（射击判定仍用零宽 los）。
     // 特殊情况：
     //   - 狂暴模式（自己有护盾）：放宽反打距离到中距，主动进攻
     //   - 避战模式（敌人有护盾未到期）：禁用反打——打了也白打
+    const bodyPathClear = los && hasClearPath(self.x, self.y, enemy.x, enemy.y, world.maze.walls);
     const counterAttackRange = berserkMode ? AI.closeCombatRange * 1.5 : AI.closeCombatRange;
-    const counterAttack = !avoidMode && los && gunReady && enemyDist < counterAttackRange
+    const counterAttack = !avoidMode && bodyPathClear && gunReady && enemyDist < counterAttackRange
       && !onLaserLine; // 压在敌方激光预瞄线上时不反打——先横移下线，再谈交火
 
     // 交战压制：敌人就在眼前（有视线且 <2.5 格）时不做捡道具决策——
@@ -465,15 +489,14 @@ export class AiController {
     // 避战模式除外（敌有盾，躲着捡本就是正确策略）。
     const engaged = los && enemyDist < CELL_SIZE * 2.5;
 
-    // —— 1) 脱困机动：倒车 + 定向转，可被反打抢占 ——
-    // 贴脸被对方顶住推不动是对撞的常态而非卡死，此时该开炮不该掉头
+    // —— 1) 脱困机动：倒车 + 定向转，做完为止不被抢占 ——
+    // 曾允许反打抢占（「贴脸被顶住该开炮不该掉头」），实测是隔墙对撞
+    // 死锁的一环：顶墙触发脱困 → 反打立刻抢占 → 回去继续顶墙。
+    // 真贴脸对撞时敌我 bodyPathClear 成立、卡住检测有 0.6s 窗口，
+    // 脱困 0.45s 做完再反打只慢半拍，换来的是永不死锁。
     if (this.unstickTimer > 0) {
-      if (counterAttack) {
-        this.unstickTimer = 0; // 反打抢占，立即转入交战
-      } else {
-        this.unstickTimer -= dt;
-        return { turn: this.unstickTurn, move: -1, fire: false, special: false };
-      }
+      this.unstickTimer -= dt;
+      return { turn: this.unstickTurn, move: -1, fire: false, special: false };
     }
 
     // —— 2) 躲弹：选定逃生航向后锁 dodgeCommit 秒 ——
@@ -509,7 +532,11 @@ export class AiController {
 
     let turn, move;
     this.dodgeTimer -= dt;
-    if (counterAttack || berserkMode) this.dodgeTimer = 0; // 反打/狂暴优先，中断闪避
+    // 狂暴（有盾）才中断闪避——盾能吃伤害，冲锋是赚的。
+    // counterAttack 不再中断：近战圈内 gunReady 以 0.05~0.28s 周期翻转
+    // （closeCooldownBoost 4 倍速），高频清零会把 dodgeCommit 防抖完全击穿，
+    // 闪避永远做不完半个（贴脸抽搐的根源）。锁定期走完再反打。
+    if (berserkMode) this.dodgeTimer = 0;
     const threat = !counterAttack && !berserkMode && this.cfg.dodgeHorizon > 0
       ? this.findThreat(self, threatBullets)
       : null;
@@ -526,6 +553,7 @@ export class AiController {
       ({ turn, move } = steerToHeading(self, this.dodgeHeading));
       this.path = [];        // 闪避破坏走位，旧路径作废，威胁解除后重算
       this.movingTime = 0;   // 闪避不计入卡住检测（被弹幕压在墙角不算卡）
+      this.bounceShot = null; // 闪避期间跳弹解不再刷新，作废防陈旧解泄漏到开火
     } else {
       // —— 3) 追击 / 捡道具 / 战术撤退：根据自己和敌人的道具状态选策略 ——
 
@@ -546,22 +574,33 @@ export class AiController {
           // 没道具可捡：保持距离游走（不主动靠近送死，也不硬后撤撞墙）
           // 策略：距离 <4 格时远离（BFS 到对面），距离够远时原地游走等护盾消失
           if (enemyDist < CELL_SIZE * 4) {
-            // 太近：选一个远离敌人的目标格（敌人对面方向，地图对角）
-            const enemyCell = cellOf(enemy, world.maze);
-            const awayC = Math.floor(world.maze.cols - 1 - enemyCell.c); // 水平对面
-            const awayR = Math.floor(world.maze.rows - 1 - enemyCell.r); // 垂直对面
-            goal = cellCenter({ c: awayC, r: awayR });
+            // 太近：沿「敌→我」方向外推 3 格拉开距离。
+            // 旧算法取敌人格的地图镜像格——敌人在中心格时镜像=敌人自己那格，
+            // 避战模式反而 BFS 直冲无敌坦克；对称地图上镜像格还是拓扑等价点。
+            const fleeLen = CELL_SIZE * 3;
+            const fdx = self.x - enemy.x, fdy = self.y - enemy.y;
+            const fLen = Math.hypot(fdx, fdy) || 1;
+            const fleeCell = cellOf({
+              x: self.x + (fdx / fLen) * fleeLen,
+              y: self.y + (fdy / fLen) * fleeLen,
+            }, world.maze); // cellOf 自带 clamp 图内
+            goal = cellCenter(fleeCell);
             goalLos = false; // 用 BFS 绕路，不撞墙
           } else {
             // 距离够远：小幅游走别傻站着——目标缓存 1.5s 再换
-            // （逐帧随机目标会让 BFS 频繁重算、原地抖成帕金森）
+            // （逐帧随机目标会让 BFS 频繁重算、原地抖成帕金森）。
+            // 已走到目标附近也立刻重抽——否则同格 BFS 返回空路径，
+            // target 落在脚下，方向噪声让 turn 随机翻转原地抖到计时器到期
             this.wanderTimer -= dt;
-            if (!this.wanderGoal || this.wanderTimer <= 0) {
+            const wanderArrived = this.wanderGoal &&
+              Math.hypot(this.wanderGoal.x - self.x, this.wanderGoal.y - self.y) < CELL_SIZE * 0.4;
+            if (!this.wanderGoal || this.wanderTimer <= 0 || wanderArrived) {
               const randomAngle = Math.random() * Math.PI * 2;
-              this.wanderGoal = {
+              const wc = cellOf({
                 x: self.x + Math.cos(randomAngle) * CELL_SIZE * 1.5,
                 y: self.y + Math.sin(randomAngle) * CELL_SIZE * 1.5,
-              };
+              }, world.maze); // clamp 图内，防目标落图外被系统性拉向边缘
+              this.wanderGoal = cellCenter(wc);
               this.wanderTimer = 1.5;
             }
             goal = this.wanderGoal;
@@ -605,14 +644,10 @@ export class AiController {
       // 边追边连续还手就是最强进攻；撞上对方有坦克碰撞顶着，无碍
       let target;
       if (goalLos) {
-        // 有视线：道具直追其位置；后撤点/敌人分别处理
-        if (powerupTarget) {
-          target = { x: goal.x, y: goal.y };        // 道具：直追
-        } else if (goal === enemy) {
-          target = { x: aimX, y: aimY };            // 追敌：拦截点（lead pursuit）
-        } else {
-          target = { x: goal.x, y: goal.y };        // 后撤点：直接走向目标点
-        }
+        // 有视线：一律朝目标本体开车。追敌也不再用拦截点当驾驶目标——
+        // 拦截点是给炮口的（hard 提前量可达 2 格，常在墙后），拿来开车
+        // 会朝墙后空点怼（隔墙对撞帮凶之一）；瞄准仍用 aimX/aimY（见开火段）。
+        target = { x: goal.x, y: goal.y };
         this.path = [];          // 直追时旧路径作废
         this.pathGoalCell = null;
       } else {
@@ -623,12 +658,21 @@ export class AiController {
         if (this.replanTimer <= 0 || this.path.length === 0 || goalChanged) {
           this.replanTimer = this.cfg.replanInterval;
           this.path = findPath(world.maze, cellOf(self, world.maze), goalCell, blockedCells);
+          // 带禁行格算不出路 ≠ 物理不可达——rooms 风格门少，一颗雷封住门格
+          // 就割断连通。降级重算无视雷的物理路径（宁可绕雷圈也别直怼穿墙）
+          if (this.path.length === 0 && blockedCells) {
+            this.path = findPath(world.maze, cellOf(self, world.maze), goalCell, null);
+          }
           this.pathGoalCell = goalCell;
         }
-        // 走到路点格中心附近就弹出，奔向下一个（while：一帧可能跨过多个）
+        // 走到路点格中心附近就弹出，奔向下一个（while：一帧可能跨过多个）。
+        // 「已进入路点格」也算到达——切内角时可能不经过格心，只按距离判会
+        // 让路点永不弹出，车头被掰回身后原地折返抖动
+        const selfCell = cellOf(self, world.maze);
         while (this.path.length > 0) {
           const wp = cellCenter(this.path[0]);
-          if (Math.hypot(wp.x - self.x, wp.y - self.y) > CELL_SIZE * 0.3) break;
+          const inCell = this.path[0].c === selfCell.c && this.path[0].r === selfCell.r;
+          if (!inCell && Math.hypot(wp.x - self.x, wp.y - self.y) > CELL_SIZE * 0.3) break;
           this.path.shift();
         }
         // 路径走完/不可达兜底：直接朝目标本体怼（撞墙滑动 + 卡住脱困能兜住）
@@ -659,8 +703,10 @@ export class AiController {
       }
 
       // —— 4) 卡住检测：连续想动 stuckWindow 秒却没挪出 stuckMinDist → 脱困 ——
-      // 反打期间不计入：贴脸被对方车体顶住推不动是交战常态，掉头就输了
-      if (move !== 0 && !counterAttack) {
+      // 计时不再被 counterAttack 高频清零（那会让顶墙死锁数学上无法触发脱困），
+      // 但触发时区分卡在哪：被【敌车】顶住（贴脸且车身通路无墙）是交战常态，
+      // 顶着打就是最优解不该掉头；被【墙】卡住（bodyPathClear 为假）才倒车脱困。
+      if (move !== 0) {
         if (this.movingTime === 0) {
           this.anchorX = self.x; // 刚开始想动，锚定起点
           this.anchorY = self.y;
@@ -668,7 +714,8 @@ export class AiController {
         this.movingTime += dt;
         if (this.movingTime >= AI.stuckWindow) {
           const moved = Math.hypot(self.x - this.anchorX, self.y - this.anchorY);
-          if (moved < AI.stuckMinDist) {
+          const clinch = bodyPathClear && enemyDist < TANK.radius * 3; // 贴脸互顶
+          if (moved < AI.stuckMinDist && !clinch) {
             this.unstickTimer = AI.unstickTime;
             this.unstickTurn = Math.random() < 0.5 ? -1 : 1;
             this.path = []; // 卡住说明旧路径不可信，脱困后重算
@@ -727,6 +774,25 @@ export class AiController {
       if (Math.abs(normalizeAngle(bs.angle - self.angle)) < tol) {
         fire = true;
         this.fireTimer = randRange(this.cfg.fireCooldown);
+      }
+    } else if (this.cfg.bounceAim && !los && gunReady && !this.bounceShot) {
+      // 打墙开路（hard 专属，阶段 22）：无视线、无跳弹解、炮口正对残血内墙
+      // （hp≤2，一两发就穿）且墙背后≈敌人方向 → 开火磨墙。玩家能磨墙偷袭，
+      // hard 也该会——利用可破坏地形与玩家同权。语义门槛收紧：只有已经
+      // 朝向敌人（炮口↔敌方向 <30°）时才打，避免乱枪打墙浪费弹药预算。
+      if (Math.abs(aimErr) < Math.PI / 6) {
+        const m = self.muzzlePoint();
+        const reach = CELL_SIZE * 2; // 只磨脸前两格内的墙（远墙磨不划算）
+        const ex2 = m.x + Math.cos(self.angle) * reach;
+        const ey2 = m.y + Math.sin(self.angle) * reach;
+        for (const w of world.maze.walls) {
+          if (w.border || w.hp === undefined || w.hp > 2) continue;
+          if (segmentVsSegment(m.x, m.y, ex2, ey2, w.x1, w.y1, w.x2, w.y2)) {
+            fire = true;
+            this.fireTimer = randRange(this.cfg.fireCooldown);
+            break;
+          }
+        }
       }
     }
 
@@ -847,12 +913,14 @@ export class AiController {
     const cfg = this.cfg;
 
     // 困难档：激进策略——只要弹幕不是逼到脸上就敢冲（盾/散射收益大）
-    if (cfg.label === "困难") {
+    // （档位判定用 bounceAim 特征位而非 label 文案——label 是 UI 显示词，改文案不该改行为）
+    if (cfg.bounceAim) {
       // 道具方向有逼近的子弹 且 <1 秒内会命中 → 太危险，放弃
       const threat = this.findThreat(self, world.bullets);
       if (threat && threat.t < 1.0) {
         // 检查威胁方向是否与道具方向夹角 <60°（冲向道具会撞子弹）
-        const toThreat = Math.atan2(threat.my - self.y, threat.mx - self.x);
+        // 威胁方向 = 自己指向子弹当前位置（threat.mx/my 是脱靶向量不是坐标，不能当点用）
+        const toThreat = Math.atan2(threat.b.y - self.y, threat.b.x - self.x);
         const toPowerup = Math.atan2(pw.y - self.y, pw.x - self.x);
         let diff = Math.abs(toThreat - toPowerup);
         if (diff > Math.PI) diff = Math.PI * 2 - diff;

@@ -116,7 +116,7 @@ export class Tank {
       const out = [];
       const mid = (pellets - 1) / 2;
       for (let i = 0; i < pellets; i++) {
-        out.push(this.spawnBullet(this.angle + (i - mid) * spreadAngle, walls));
+        out.push(this.spawnBullet(this.angle + (i - mid) * spreadAngle, walls, "scatter"));
       }
       return { bullets: out, laser: null };
     }
@@ -169,7 +169,8 @@ export class Tank {
 
   // 沿给定 heading 生成一发子弹，含贴墙出膛修正（防穿墙）。
   // 抽出来供单发 / 散射多发共用：每发各按自己的角度独立修正出膛点。
-  spawnBullet(heading, walls) {
+  // kind 标记弹种（"bullet"/"scatter"）——统计击杀归类、AI 弹药预算区分用。
+  spawnBullet(heading, walls, kind = "bullet") {
     // 炮口位置：从车体中心沿朝向伸出（炮管末端再多探出一点，避免子弹生成在车体内被自己挡）
     const muzzleDist = TANK.bodyLength / 2 + TANK.barrelLength + BULLET.radius + 2;
 
@@ -193,7 +194,9 @@ export class Tank {
     const by = this.y + Math.sin(heading) * spawnDist;
     const vx = Math.cos(heading) * BULLET.speed;
     const vy = Math.sin(heading) * BULLET.speed;
-    return new Bullet(bx, by, vx, vy, this);
+    const b = new Bullet(bx, by, vx, vy, this);
+    b.kind = kind;
+    return b;
   }
 
   // 拾取道具：按类型设置对应状态。

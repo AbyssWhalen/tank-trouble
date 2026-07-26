@@ -254,6 +254,72 @@ section("AI 捡道具机会成本");
 }
 
 // ============================================================
+section("AI 隔墙不对撞 (counterAttack 可达门 + 卡住脱困)");
+{
+  // 5×3 场地，中间一段竖内墙把 bot 和敌人隔开。敌人贴墙自由端附近静止
+  // （零宽 LOS 从端点泄漏带可能判通视，但车身过不去——阶段 22 之前 AI
+  // 会在这里无限顶墙）。跑 600 帧断言 AI 不死锁：要么净位移离开（绕路/
+  // 脱困生效），要么压墙帧占比受控。
+  const COLS = 5, ROWS = 3;
+  const S = CELL_SIZE;
+  const W = COLS * S, H = ROWS * S;
+  const walls = [
+    { x1: 0, y1: 0, x2: W, y2: 0, border: true },
+    { x1: W, y1: 0, x2: W, y2: H, border: true },
+    { x1: W, y1: H, x2: 0, y2: H, border: true },
+    { x1: 0, y1: H, x2: 0, y2: 0, border: true },
+    // 竖内墙：格(2,1) 的 left（x=2S，跨 y=[S,2S]）——中排中间一堵孤立墙桩
+    { x1: 2 * S, y1: S, x2: 2 * S, y2: 2 * S, border: false, hp: 5 },
+  ];
+  const cells = Array.from({ length: ROWS }, (_, r) =>
+    Array.from({ length: COLS }, (_, c) => ({
+      top: r === 0, bottom: r === ROWS - 1, left: c === 0, right: c === COLS - 1,
+    }))
+  );
+  cells[1][2].left = true;
+  cells[1][1].right = true;
+
+  const mkP = (tank) => ({ tank, get alive() { return this.tank.alive; } });
+  // 敌人贴内墙东侧、靠近墙北端（自由端泄漏带位置），静止不动
+  const enemyTank = new Tank(2 * S + TANK.radius + 6, S + 26, Math.PI, "#e63946");
+  // bot 在内墙西侧同高度——距敌 ~44px，远小于 closeCombatRange(130)
+  const botTank = new Tank(2 * S - TANK.radius - 6, S + 30, 0, "#1ba39c");
+  const bot = mkP(botTank);
+  const foe = mkP(enemyTank);
+  const world = { maze: { cols: COLS, rows: ROWS, walls, cells }, players: [bot, foe], bullets: [], powerups: [], mines: [] };
+
+  const ai = new AiController(bot, foe, "hard"); // hard 提前量最大，最容易触发旧 bug
+  const x0 = botTank.x, y0 = botTank.y;
+  let pressFrames = 0;   // 想动却没动的帧
+  let unstickEdges = 0;  // 脱困触发次数
+  let prevUnstick = 0;
+  let maxExcursion = 0;  // 距起点最远距离（是否真的离开过墙边）
+  let ok = true, err = "";
+  try {
+    for (let f = 0; f < 600; f++) {
+      const px = botTank.x, py = botTank.y;
+      const c = ai.update(1 / 60, world);
+      botTank.update(1 / 60, walls, c);
+      const moved = Math.hypot(botTank.x - px, botTank.y - py);
+      if (c.move !== 0 && moved < 0.3) pressFrames++;
+      if (ai.unstickTimer > 0 && prevUnstick <= 0) unstickEdges++;
+      prevUnstick = ai.unstickTimer;
+      maxExcursion = Math.max(maxExcursion, Math.hypot(botTank.x - x0, botTank.y - y0));
+    }
+  } catch (e) {
+    ok = false;
+    err = e.stack.split("\n")[0];
+  }
+  check("600 帧无异常", ok, err);
+  // 死锁特征 = 压墙帧占绝对多数且从未离开。修复后：要么绕路（远离），要么脱困循环在动
+  check("未陷入顶墙死锁（压墙帧 < 55% 或曾离开 1 格远）",
+    pressFrames < 330 || maxExcursion > CELL_SIZE,
+    `press=${pressFrames}/600 excursion=${maxExcursion.toFixed(0)}px unstick=${unstickEdges}`);
+  check("卡住脱困可触发（不再被反打豁免锁死）", unstickEdges >= 1 || pressFrames < 60,
+    `unstick=${unstickEdges} press=${pressFrames}`);
+}
+
+// ============================================================
 section("AI 躲激光预瞄线 (全路径感知)");
 {
   // 10×5 开阔场地（只有边界墙）：宽度 960 = 激光总长上限，可测最远端感知。

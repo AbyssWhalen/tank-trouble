@@ -521,10 +521,7 @@ function updatePlaying(dt) {
       playSfx(res.bullets.length > 1 ? "shootScatter" : "shoot"); // 散射一炮一个音
       recordFired(i, res.bullets.length); // 命中率分母按实际弹数（散射 3 发计 3）
     }
-    for (const b of res.bullets) {
-      b.kind = res.bullets.length > 1 ? "scatter" : "bullet"; // 统计击杀归类用
-      bullets.push(b);
-    }
+    for (const b of res.bullets) bullets.push(b); // kind 已由 tank.spawnBullet 打好
     if (res.laser) {
       recordFired(i, 1);
       fireLaser(res.laser, players[i]); // 补传射手，击杀归属统计

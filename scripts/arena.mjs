@@ -116,6 +116,8 @@ function playRound(sideAFirst) {
   };
 
   const dt = 1 / 60;
+  // 行为质量指标（阶段 22）：每回合累计位移与卡住脱困触发次数
+  const trace = players.map((p) => ({ dist: 0, stuck: 0, lastX: p.tank.x, lastY: p.tank.y, prevUnstick: 0 }));
   for (let t = 0; t < TIMEOUT; t += dt) {
     // 1) 全员控制指令（同一帧世界快照）
     const world = { maze, players, bullets, powerups, mines };
@@ -137,6 +139,16 @@ function playRound(sideAFirst) {
         const fb = resolveCircleWalls(b.x, b.y, TANK.radius, maze.walls);
         b.x = fb.x; b.y = fb.y;
       }
+    }
+
+    // 行为采样（分离修正之后，位移才是净值）
+    for (let i = 0; i < players.length; i++) {
+      const tr = trace[i], tk = players[i].tank;
+      tr.dist += Math.hypot(tk.x - tr.lastX, tk.y - tr.lastY);
+      tr.lastX = tk.x; tr.lastY = tk.y;
+      const u = players[i].ctrl.unstickTimer ?? 0;
+      if (u > 0 && tr.prevUnstick <= 0) tr.stuck++;
+      tr.prevUnstick = u;
     }
 
     // 2.7) 道具刷新 + 拾取
@@ -209,10 +221,11 @@ function playRound(sideAFirst) {
         winner: alive.length === 1 ? alive[0].side : null,
         cause: deathCause,
         timeout: false,
+        trace: players.map((p, i) => ({ side: p.side, ...trace[i] })),
       };
     }
   }
-  return { winner: null, cause: [], timeout: true };
+  return { winner: null, cause: [], timeout: true, trace: players.map((p, i) => ({ side: p.side, ...trace[i] })) };
 }
 
 // —— 主循环 + 汇总 ——
@@ -222,12 +235,14 @@ const deaths = {
   A: { bullet: 0, laser: 0, mine: 0 },
   B: { bullet: 0, laser: 0, mine: 0 },
 };
+const quality = { A: { stuck: 0 }, B: { stuck: 0 } }; // 行为质量：卡住脱困总次数
 for (let r = 0; r < ROUNDS; r++) {
   const res = playRound(r % 2 === 0);
   if (res.timeout) stat.timeout++;
   else if (res.winner) stat[res.winner]++;
   else stat.draw++;
   for (const c of res.cause) deaths[c.side][c.cause]++;
+  for (const tr of res.trace || []) quality[tr.side].stuck += tr.stuck;
   if ((r + 1) % 25 === 0) process.stderr.write(`.. ${r + 1}/${ROUNDS}\n`);
 }
 
@@ -238,3 +253,4 @@ console.log(`道具池: ${TYPES.length ? TYPES.join(",") : "无"}`);
 console.log(`A 胜 ${stat.A} (${pct(stat.A)})   B 胜 ${stat.B} (${pct(stat.B)})   双杀 ${stat.draw}   超时 ${stat.timeout}`);
 console.log(`A 死于: ${fmt(deaths.A)}`);
 console.log(`B 死于: ${fmt(deaths.B)}`);
+console.log(`卡住脱困: A ${quality.A.stuck} 次 / B ${quality.B.stuck} 次（越少越顺滑）`);
