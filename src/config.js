@@ -103,6 +103,10 @@ export const KEY_BINDINGS = [
 // 回合结束到下一局重开的延迟（秒）
 export const ROUND_RESTART_DELAY = 1.5;
 
+// 局胜制：先到这个胜场数赢得整场（MATCH_OVER 大结算，可再来一场或回菜单）。
+// 同归于尽不加分，所以整场时长有自然上限但无固定局数。
+export const MATCH_TARGET = 5;
+
 // 坦克被击破的爆炸效果（参考原版：深色烟团 + 浅色碎片四散）。
 // 时长须 < ROUND_RESTART_DELAY，保证结算横幅期间能播完整段动画。
 // 联机 v2 同款复用：死亡有视觉反馈而不是凭空消失。
@@ -300,6 +304,14 @@ export const SFX = {
     { type: "tone", wave: "triangle", freq: [523, 523], dur: 0.12, gain: 0.22 },
     { type: "tone", wave: "triangle", freq: [659, 659], dur: 0.12, gain: 0.22, delay: 0.12 },
     { type: "tone", wave: "triangle", freq: [784, 784], dur: 0.3, gain: 0.22, delay: 0.24 },
+  ],
+  // 整场获胜（先到 MATCH_TARGET）：roundWin 的加长版——C5-E5-G5-C6 四音上行，
+  // 末音拉长收尾，比单回合胜利更隆重（家族感：同波形同音区，只是更长更高）
+  matchWin: [
+    { type: "tone", wave: "triangle", freq: [523, 523], dur: 0.12, gain: 0.25 },
+    { type: "tone", wave: "triangle", freq: [659, 659], dur: 0.12, gain: 0.25, delay: 0.12 },
+    { type: "tone", wave: "triangle", freq: [784, 784], dur: 0.12, gain: 0.25, delay: 0.24 },
+    { type: "tone", wave: "triangle", freq: [1047, 1047], dur: 0.5, gain: 0.25, delay: 0.36 },
   ],
   // 同归于尽：下行双音（低落感）
   roundDraw: [

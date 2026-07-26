@@ -17,7 +17,7 @@
 import {
   CANVAS, PLAYER_COLORS, KEY_BINDINGS, MAZE_TIERS, TIER_POOL_BY_MODE,
   WALL, CELL_SIZE, BULLET, TANK, THEME, ROUND_RESTART_DELAY,
-  POWERUP, PICKUP_RATE,
+  POWERUP, PICKUP_RATE, MATCH_TARGET,
 } from "./config.js";
 import { Player } from "./player.js";
 import { generateMaze } from "./maze.js";
@@ -35,7 +35,8 @@ import {
 } from "./input.js";
 import {
   renderMenu, renderPauseOverlay, renderHud, renderRoundOverBanner,
-  renderRebindOverlay, menuAction, pauseAction, rebindAction, keyLabel,
+  renderMatchOverBanner, renderRebindOverlay,
+  menuAction, pauseAction, rebindAction, matchOverAction, keyLabel,
 } from "./ui.js";
 import {
   initSettings, saveBindings, resetBindings,
@@ -80,7 +81,7 @@ initSettings();
 initAudio(loadAudioMuted() ?? false);
 
 // —— 游戏状态机 ——
-const STATE = { MENU: "menu", PLAYING: "playing", PAUSED: "paused", ROUND_OVER: "round_over" };
+const STATE = { MENU: "menu", PLAYING: "playing", PAUSED: "paused", ROUND_OVER: "round_over", MATCH_OVER: "match_over" };
 let state = STATE.MENU;
 
 // —— 对局状态 ——
@@ -111,6 +112,15 @@ let showHelp = false;          // 玩法说明浮窗是否显示（叠在菜单�
 // capturing 非空表示等待玩家按下新键；conflictMsg 是面板内的红字提示（限时消失）
 const rebind = { open: false, capturing: null, conflictMsg: "", msgTimer: 0 };
 const RESERVED_KEYS = ["Escape", "F11"]; // 系统语义键，禁止绑定（Esc=暂停/取消，F11=全屏）
+
+// 开发自检钩子（CDP 驱动验证用，见 CLAUDE.md「开发自检」）：
+// 模块闭包外唯一的状态窥视口。只读快照 + 强设比分（快进局胜流转测试），
+// 不进任何正常交互路径；本地单机游戏，常驻无害。
+window.__devHook = {
+  snapshot: () => ({ state, matchScores: [...matchScores], winnerIndex: winner ? winner.index : null }),
+  forceScores: (a, b) => { matchScores = [a, b]; },
+  setTank: (i, patch) => { if (players[i]) Object.assign(players[i].tank, patch); },
+};
 
 // 开一整场：从菜单进入时调用。清零累计分，再开第一回合。
 // 与 setupRound 的分工：startMatch 负责「整场」级状态(分数)，
@@ -187,6 +197,9 @@ function update(dt) {
       break;
     case STATE.ROUND_OVER:
       updateRoundOver(dt);
+      break;
+    case STATE.MATCH_OVER:
+      updateMatchOver(dt);
       break;
   }
   endFrame();
@@ -463,9 +476,15 @@ function updatePlaying(dt) {
     // 计分：转 ROUND_OVER 这一帧加一次（同归于尽 winner=null 不加分）。
     // 状态切走后不再进 updatePlaying，天然只触发一次，无需额外加锁。
     if (winner) matchScores[winner.index]++;
-    roundOverTimer = ROUND_RESTART_DELAY; // 启动自动重开倒计时
-    state = STATE.ROUND_OVER;
-    playSfx(winner ? "roundWin" : "roundDraw"); // 状态切走后不再进本函数，天然只播一次
+    if (winner && matchScores[winner.index] >= MATCH_TARGET) {
+      // 先到局胜分：整场结束，大横幅等玩家选择（无自动倒计时）
+      state = STATE.MATCH_OVER;
+      playSfx("matchWin");
+    } else {
+      roundOverTimer = ROUND_RESTART_DELAY; // 启动自动重开倒计时
+      state = STATE.ROUND_OVER;
+      playSfx(winner ? "roundWin" : "roundDraw"); // 状态切走后不再进本函数，天然只播一次
+    }
   }
 }
 
@@ -552,6 +571,22 @@ function updateRoundOver(dt) {
   }
 }
 
+// 整场结算：无自动倒计时，等玩家选「再来一场 / 返回菜单」（按钮或 R/Esc 键）。
+function updateMatchOver(dt) {
+  updateEffects(dt); // 终杀爆炸动画播完
+
+  let choice = null;
+  if (isJustPressed("KeyR")) choice = "rematch";
+  else if (isJustPressed("Escape")) choice = "menu";
+  else if (isClicked()) {
+    choice = matchOverAction(getMousePos().x, getMousePos().y);
+    if (choice) playSfx("uiClick");
+  }
+
+  if (choice === "rematch") startMatch(currentMode); // 比分清零，同模式重开整场
+  else if (choice === "menu") state = STATE.MENU;
+}
+
 // 推进所有特效 + 屏幕震动，播完的移除。PLAYING 与 ROUND_OVER 共用。
 function updateEffects(dt) {
   updateShake(dt);
@@ -585,6 +620,10 @@ function render() {
     case STATE.ROUND_OVER:
       renderArena();
       renderRoundOverBanner(ctx, { winner, secondsLeft: roundOverTimer });
+      break;
+    case STATE.MATCH_OVER:
+      renderArena();
+      renderMatchOverBanner(ctx, { winner, matchScores, players, mouse: getMousePos() });
       break;
   }
 }

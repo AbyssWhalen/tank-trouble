@@ -9,6 +9,7 @@
 import {
   CANVAS, THEME, AI_DIFFICULTY, PLAYER_COLORS, KEY_BINDINGS, POWERUP,
 } from "./config.js";
+import { drawPowerupIcon } from "./powerup.js";
 
 // —— 菜单按钮（逻辑坐标，不随迷宫平移）——
 const BTN_W = 300, BTN_H = 66;
@@ -93,6 +94,12 @@ const pauseButtons = [
   { label: "返回主菜单", action: "menu", x: PAUSE_BTN_X, y: 410, w: PAUSE_BTN_W, h: PAUSE_BTN_H },
 ];
 
+// —— 整场结算按钮（MATCH_OVER 大横幅里的两个按钮，比分区下方）——
+const matchOverButtons = [
+  { label: "再来一场", action: "rematch", x: PAUSE_BTN_X, y: 440, w: PAUSE_BTN_W, h: PAUSE_BTN_H },
+  { label: "返回主菜单", action: "menu", x: PAUSE_BTN_X, y: 510, w: PAUSE_BTN_W, h: PAUSE_BTN_H },
+];
+
 // 点 (mx,my) 是否落在矩形内
 function hitRect(mx, my, r) {
   return mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h;
@@ -171,6 +178,14 @@ export function menuAction(mx, my, { showHelp }) {
 // 暂停浮层点击：返回 "resume" | "menu" | null
 export function pauseAction(mx, my) {
   for (const b of pauseButtons) {
+    if (hitRect(mx, my, b)) return b.action;
+  }
+  return null;
+}
+
+// 整场结算横幅点击：返回 "rematch" | "menu" | null
+export function matchOverAction(mx, my) {
+  for (const b of matchOverButtons) {
     if (hitRect(mx, my, b)) return b.action;
   }
   return null;
@@ -656,6 +671,14 @@ export function renderHud(ctx, { players, matchScores, isPlaying }) {
       : `${p.alive ? "" : "阵亡  "}${score}  ${p.label}`;
     const tx = left ? x + 22 : x - 22;
     ctx.fillText(text, tx, y);
+
+    // —— 武器/护盾徽章：接在文字末端向中线方向排 ——
+    // 武器槽互斥（scatter/laser/mine 三选一）→ 最多 1 武器徽章 + 1 护盾徽章
+    const textW = ctx.measureText(text).width;
+    let bx = left ? tx + textW + 22 : tx - textW - 22; // 首枚徽章圆心
+    const step = left ? 26 : -26;                       // 后续徽章间距（朝中线）
+    renderWeaponBadges(ctx, p.tank, bx, y, step);
+    ctx.font = "bold 18px system-ui, 'Microsoft YaHei', sans-serif"; // 徽章角标改过字体，还原
   }
 
   // 对战中底部提示：可随时按 Esc 退回菜单（仅 PLAYING 显示；
@@ -668,6 +691,49 @@ export function renderHud(ctx, { players, matchScores, isPlaying }) {
   }
 
   ctx.textAlign = "left";
+}
+
+// HUD 武器/护盾徽章：小号道具图标 + 剩余次数角标 + 到期闪烁。
+// tank 的武器槽互斥，这里按 scatter/laser/mine 顺序取第一个非零的画；
+// 护盾独立并存，作为第二枚。bx 为首枚圆心 x，step 带方向（左玩家 +、右玩家 -）。
+function renderWeaponBadges(ctx, tank, bx, y, step) {
+  const R = 10; // 徽章半径（配 18px 字高）
+
+  // 徽章 + 右下角计数角标
+  const badge = (type, count, blink) => {
+    ctx.save();
+    if (blink !== undefined) ctx.globalAlpha = blink;
+    drawPowerupIcon(ctx, type, bx, y, R);
+    if (count !== undefined && count > 1) {
+      // 次数 >1 才画角标（=1 是默认情况，图标本身已说明"还有"）
+      ctx.font = "bold 11px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = THEME.textMain;
+      ctx.strokeText(String(count), bx + R * 0.8, y + R * 0.8);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(String(count), bx + R * 0.8, y + R * 0.8);
+    }
+    ctx.restore();
+    bx += step;
+  };
+
+  if (tank.scatterShots > 0) {
+    badge("scatter", tank.scatterShots);
+  } else if (tank.laserShots > 0) {
+    badge("laser", tank.laserShots);
+  } else if (tank.mineCharges > 0) {
+    // 持雷快作废（<3s）闪烁提醒——不显示秒数，闪烁本身就是"快没了"
+    const blink = tank.mineHoldTimer < 3 ? 0.35 + 0.5 * Math.abs(Math.sin(tank.mineHoldTimer * 6)) : undefined;
+    badge("mine", tank.mineCharges, blink);
+  }
+
+  if (tank.shield) {
+    // 快到期闪烁阈值与坦克自身护盾环一致（<1.5s），两处视觉同步
+    const blink = tank.shieldTimer < 1.5 ? 0.35 + 0.5 * Math.abs(Math.sin(tank.shieldTimer * 8)) : undefined;
+    badge("shield", undefined, blink);
+  }
 }
 
 // 回合结算横幅。view = { winner, secondsLeft }
@@ -709,4 +775,56 @@ export function renderRoundOverBanner(ctx, { winner, secondsLeft }) {
   ctx.fillStyle = THEME.textDim;
   ctx.font = "15px system-ui, 'Microsoft YaHei', sans-serif";
   ctx.fillText("R  立即开始          Esc  返回菜单", cx, cy + 80);
+}
+
+// 整场结算大横幅（先到 MATCH_TARGET 分）。view = { winner, matchScores, players, mouse }
+// 与回合横幅的区别：无自动倒计时（等玩家选择）、显示大比分、带按钮。
+export function renderMatchOverBanner(ctx, { winner, matchScores, players, mouse }) {
+  const cx = CANVAS.width / 2;
+  const { x: mx, y: my } = mouse;
+
+  // 浅色半透明压层（同回合横幅，区别于暂停的深色遮罩——这是庆祝不是打断）
+  ctx.fillStyle = THEME.overlay;
+  ctx.fillRect(0, 0, CANVAS.width, CANVAS.height);
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  // 胜者色块圆点 + 主标题
+  ctx.fillStyle = winner.color;
+  ctx.beginPath();
+  ctx.arc(cx, 200, 18, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = THEME.textMain;
+  ctx.font = "bold 56px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText(`${winner.label} 赢得本场`, cx, 268);
+
+  // 大比分：双方各自玩家色（左分-冒号-右分三段分别绘制，色彩对位）
+  ctx.font = "bold 44px system-ui, sans-serif";
+  ctx.fillStyle = players[0].color;
+  ctx.fillText(String(matchScores[0]), cx - 56, 348);
+  ctx.fillStyle = THEME.textDim;
+  ctx.fillText(":", cx, 344);
+  ctx.fillStyle = players[1].color;
+  ctx.fillText(String(matchScores[1]), cx + 56, 348);
+
+  // 按钮（白底 hover 主题色，同暂停浮层风格）
+  for (const b of matchOverButtons) {
+    const hover = hitRect(mx, my, b);
+    ctx.fillStyle = hover ? THEME.accent : "#ffffff";
+    roundRect(ctx, b.x, b.y, b.w, b.h, 10);
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = hover ? THEME.accentLight : THEME.btnBorder;
+    roundRect(ctx, b.x, b.y, b.w, b.h, 10);
+    ctx.stroke();
+    ctx.fillStyle = hover ? "#ffffff" : THEME.textMain;
+    ctx.font = "bold 20px system-ui, 'Microsoft YaHei', sans-serif";
+    ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2);
+  }
+
+  // 小字快捷键
+  ctx.fillStyle = THEME.textDim;
+  ctx.font = "15px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText("R  再来一场          Esc  返回菜单", cx, 600);
 }

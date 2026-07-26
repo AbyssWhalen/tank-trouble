@@ -15,7 +15,7 @@ import { castLaserPath } from "../src/laser.js";
 import { generateMaze } from "../src/maze.js";
 import { AiController, findBounceShot } from "../src/ai.js";
 import { closestPointOnSegment } from "../src/collision.js";
-import { POWERUP, TANK, KEY_BINDINGS, BULLET, CELL_SIZE, SFX, PICKUP_RATE } from "../src/config.js";
+import { POWERUP, TANK, KEY_BINDINGS, BULLET, CELL_SIZE, SFX, PICKUP_RATE, MATCH_TARGET } from "../src/config.js";
 
 let pass = 0;
 let fail = 0;
@@ -409,10 +409,10 @@ section("音效 spec 表 (SFX/PICKUP_RATE)");
   // 事件齐全 + 每层参数在合法区间，接线正确性靠 npm start 实听。
   const expected = [
     "shoot", "shootScatter", "laser", "kill", "shieldBreak", "pickup",
-    "mineDeploy", "mineBlast", "roundWin", "roundDraw", "uiClick", "uiError",
+    "mineDeploy", "mineBlast", "roundWin", "matchWin", "roundDraw", "uiClick", "uiError",
   ];
   const names = Object.keys(SFX);
-  check("12 个事件名双向齐全",
+  check("13 个事件名双向齐全",
     expected.every((n) => names.includes(n)) && names.every((n) => expected.includes(n)),
     `实有 ${names.length} 个`);
 
@@ -421,7 +421,7 @@ section("音效 spec 表 (SFX/PICKUP_RATE)");
   let layersOk = true;
   let bad = "";
   for (const [name, layers] of Object.entries(SFX)) {
-    if (!Array.isArray(layers) || layers.length < 1 || layers.length > 3) {
+    if (!Array.isArray(layers) || layers.length < 1 || layers.length > 4) {
       layersOk = false; bad = `${name} 层数非法`; break;
     }
     for (const l of layers) {
@@ -446,6 +446,9 @@ section("音效 spec 表 (SFX/PICKUP_RATE)");
 
   check("PICKUP_RATE 覆盖全部道具类型且倍率合理",
     POWERUP.types.every((t) => typeof PICKUP_RATE[t] === "number" && PICKUP_RATE[t] > 0.5 && PICKUP_RATE[t] < 2));
+
+  check("MATCH_TARGET 是合理的局胜分",
+    Number.isInteger(MATCH_TARGET) && MATCH_TARGET >= 2 && MATCH_TARGET <= 20, `= ${MATCH_TARGET}`);
 }
 
 // ============================================================

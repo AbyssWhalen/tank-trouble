@@ -39,41 +39,45 @@ export class Powerup {
   }
 
   render(ctx) {
-    const r = POWERUP.radius;
-    // 轻微呼吸：半径在 ±6% 间缓动，让道具"活"一点，好被注意到
+    // 轻微呼吸：底圆半径在 ±6% 间缓动，让道具"活"一点，好被注意到
+    // （图标本体保持原尺寸——只有底圆呼吸，与提取前的行为一致）
     const pulse = 1 + Math.sin(this.age * 3) * 0.06;
-    const rr = r * pulse;
-
-    ctx.save();
-    ctx.translate(this.x, this.y);
-
-    // —— 圆底（按类型上色）+ 深色描边 ——
-    ctx.fillStyle = TYPE_BG[this.type] || THEME.powScatterBg;
-    ctx.beginPath();
-    ctx.arc(0, 0, rr, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = THEME.powRing;
-    ctx.stroke();
-
-    // —— 类型图标（白色线条，压在底色上）——
-    ctx.strokeStyle = THEME.powIcon;
-    ctx.fillStyle = THEME.powIcon;
-    ctx.lineWidth = 2;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    if (this.type === "scatter") {
-      drawScatterIcon(ctx, r);
-    } else if (this.type === "laser") {
-      drawLaserIcon(ctx, r);
-    } else if (this.type === "mine") {
-      drawMineIcon(ctx, r);
-    } else {
-      drawShieldIcon(ctx, r);
-    }
-
-    ctx.restore();
+    drawPowerupIcon(ctx, this.type, this.x, this.y, POWERUP.radius, pulse);
   }
+}
+
+// 统一的「圆底 + 类型图标」绘制入口（地上道具与 HUD 徽章共用）。
+// r 为图标基准半径；bgScale 只缩放底圆（呼吸动画用，默认 1）。
+export function drawPowerupIcon(ctx, type, x, y, r, bgScale = 1) {
+  ctx.save();
+  ctx.translate(x, y);
+
+  // —— 圆底（按类型上色）+ 深色描边 ——
+  ctx.fillStyle = TYPE_BG[type] || THEME.powScatterBg;
+  ctx.beginPath();
+  ctx.arc(0, 0, r * bgScale, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = THEME.powRing;
+  ctx.stroke();
+
+  // —— 类型图标（白色线条，压在底色上）——
+  ctx.strokeStyle = THEME.powIcon;
+  ctx.fillStyle = THEME.powIcon;
+  ctx.lineWidth = 2;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  if (type === "scatter") {
+    drawScatterIcon(ctx, r);
+  } else if (type === "laser") {
+    drawLaserIcon(ctx, r);
+  } else if (type === "mine") {
+    drawMineIcon(ctx, r);
+  } else {
+    drawShieldIcon(ctx, r);
+  }
+
+  ctx.restore();
 }
 
 // 散射图标：三道从左侧汇聚、向右发散的箭线（表"一变三"）

@@ -26,7 +26,8 @@ Local multiplayer tank combat game with procedural maze generation, bullet ricoc
 - 🖥️ **F11 全屏** | Fullscreen toggle with state memory
 - ✨ **手感特效** | Screen shake, muzzle flash, bullet trails & explosions
 - 🔊 **程序合成音效·零素材文件** | Procedurally synthesized SFX (Web Audio, zero asset files), mute toggle persisted
-- 🎯 **回合制计分** | Round-based scoring system
+- 🎯 **局胜制·先到 5 分赢下整场** | First to 5 rounds wins the match
+- 📟 **HUD 武器状态指示** | On-HUD weapon & shield badges with ammo counts
 - 📐 **自适应窗口** | Responsive viewport scaling
 
 ---
@@ -143,6 +144,7 @@ Zero runtime dependencies, pure frontend implementation.
 - **阶段 13**：AI 强度打磨——捡道具决策修正、激光精确运用、困难档跳弹吊射，headless 对战验证调参
 - **阶段 14**：AI 激光预瞄线防守——消费全程弹道（含反弹段）绕线走位、压线即避；AI 对打竞技场收进仓库（npm run arena）
 - **阶段 15**：程序合成音效系统（Web Audio 零素材，12 类事件音 + 菜单静音开关持久化）+ v0.2.0 发布
+- **阶段 16**：HUD 武器/护盾徽章（剩余次数 + 到期闪烁）+ 局胜制（先到 5 分整场结算，可再来一场）
 
 ---
 
