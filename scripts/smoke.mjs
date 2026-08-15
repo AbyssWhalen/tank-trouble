@@ -14,7 +14,7 @@ import { Mine } from "../src/mine.js";
 import { castLaserPath } from "../src/laser.js";
 import { generateMaze, destroyWallsInRadius, destroyWallSegments } from "../src/maze.js";
 import { AiController, findBounceShot } from "../src/ai.js";
-import { closestPointOnSegment } from "../src/collision.js";
+import { closestPointOnSegment, resolveCircleWalls } from "../src/collision.js";
 import { POWERUP, TANK, KEY_BINDINGS, BULLET, CELL_SIZE, SFX, PICKUP_RATE, MATCH_TARGET, MAZE_TIERS, MAZE_STYLES, WALL } from "../src/config.js";
 
 let pass = 0;
@@ -781,6 +781,113 @@ section("战绩统计 (stats 纯函数)");
     check("P1 输连胜清零纪录保留", s.curStreak === 0 && s.bestStreak === 5);
     s = updateStreak(2, 5, null);
     check("同归于尽连胜不动", s.curStreak === 2 && s.bestStreak === 5);
+  }
+}
+
+// ============================================================
+section("波次曲线 (waves)");
+{
+  const {
+    waveSpec, pickEnemyLevel, chapterOf, shouldRemap, pickSpawnSpot,
+    normalizeWaveBest, isBetterRecord, MIX_KEYS, WAVE_TIERS,
+  } = await import("../src/waves.js");
+  const { WAVE, TIER_POOL_BY_MODE } = await import("../src/config.js");
+
+  const specs = Array.from({ length: 40 }, (_, i) => waveSpec(i + 1));
+
+  {
+    // 纯函数：同一 n 恒等（arena 跑分与 smoke 断言全靠这点）
+    const a = waveSpec(7), b = waveSpec(7);
+    check("waveSpec 确定性（同 n 同解）", JSON.stringify(a) === JSON.stringify(b));
+    check("非法 n 钳到第 1 波", waveSpec(0).wave === 1 && waveSpec(-5).wave === 1 && waveSpec(2.9).wave === 2);
+  }
+  {
+    const mono = specs.every((s, i) => i === 0 || s.quota >= specs[i - 1].quota);
+    const capped = specs.every((s) => s.quota <= WAVE.quotaCap);
+    check("配额单调不减且不超上限", mono && capped,
+      `quota: ${specs.slice(0, 8).map((s) => s.quota).join(",")} … cap ${WAVE.quotaCap}`);
+  }
+  {
+    const capped = specs.every((s) => s.concurrent <= WAVE.concurrentCap && s.concurrent >= 1);
+    // 同屏数被配额压住：第 1 波总共 1 辆，同屏不可能 2 辆
+    const byQuota = specs.every((s) => s.concurrent <= s.quota);
+    const mono = specs.every((s, i) => i === 0 || s.concurrent >= specs[i - 1].concurrent);
+    check("同屏上限 ≤ 硬顶且 ≤ 配额、单调不减", capped && byQuota && mono,
+      `concurrent: ${specs.slice(0, 8).map((s) => s.concurrent).join(",")}`);
+  }
+  {
+    const sums = specs.every((s) => Math.abs(MIX_KEYS.reduce((a, k) => a + s.mix[k], 0) - 1) < 1e-9);
+    const nonNeg = specs.every((s) => MIX_KEYS.every((k) => s.mix[k] >= -1e-12));
+    const easyDown = specs.every((s, i) => i === 0 || s.mix.easy <= specs[i - 1].mix.easy + 1e-12);
+    const hardUp = specs.every((s, i) => i === 0 || s.mix.hard >= specs[i - 1].mix.hard - 1e-12);
+    check("mix 权重和为 1、非负、easy 只降 hard 只升", sums && nonNeg && easyDown && hardUp);
+    check("第 1 波纯 easy、高波次 easy 归零且 hard 到顶",
+      specs[0].mix.easy === 1 && specs[39].mix.easy === 0 &&
+      Math.abs(specs[39].mix.hard - WAVE.hardCap) < 1e-9);
+  }
+  {
+    const inPool = specs.every((s) => WAVE_TIERS.includes(s.tier));
+    // 档位只能在换图边界变——波内换档位等于波内换图，会抹掉玩家打出来的破洞
+    const onlyAtRemap = specs.every((s, i) => i === 0 || s.tier === specs[i - 1].tier || shouldRemap(s.wave));
+    check("档位在模式池内且只在换图边界升档", inPool && onlyAtRemap,
+      `pool=${TIER_POOL_BY_MODE.wave.join("/")} largeFrom=${WAVE.largeFrom}`);
+  }
+  {
+    check("章节与换图边界一致",
+      chapterOf(1) === 0 && chapterOf(WAVE.remapEvery) === 0 && chapterOf(WAVE.remapEvery + 1) === 1 &&
+      !shouldRemap(1) && shouldRemap(WAVE.remapEvery + 1) && !shouldRemap(WAVE.remapEvery + 2));
+    check("补给每 supplyBonusEvery 波翻倍",
+      waveSpec(WAVE.supplyBonusEvery).supply === 2 && waveSpec(WAVE.supplyBonusEvery + 1).supply === 1);
+  }
+  {
+    // 加权抽取边界：rand=0 落第一个有权重的档，rand→1 落最后一个
+    const mixEasy = waveSpec(1).mix;      // { easy:1, normal:0, hard:0 }
+    const mixLate = waveSpec(40).mix;     // easy 归零
+    check("pickEnemyLevel 边界与零权重跳过",
+      pickEnemyLevel(mixEasy, () => 0) === "easy" && pickEnemyLevel(mixEasy, () => 0.999) === "easy" &&
+      pickEnemyLevel(mixLate, () => 0) === "normal" && pickEnemyLevel(mixLate, () => 0.999) === "hard");
+  }
+  {
+    check("最高记录宽松校验",
+      JSON.stringify(normalizeWaveBest(null)) === '{"wave":0,"kills":0}' &&
+      JSON.stringify(normalizeWaveBest({ wave: 7.9, kills: "bad" })) === '{"wave":7,"kills":0}' &&
+      JSON.stringify(normalizeWaveBest({ wave: -3, kills: 12 })) === '{"wave":0,"kills":12}');
+    check("破纪录判定（先波次后击杀）",
+      isBetterRecord({ wave: 5, kills: 1 }, { wave: 4, kills: 99 }) &&
+      isBetterRecord({ wave: 5, kills: 10 }, { wave: 5, kills: 9 }) &&
+      !isBetterRecord({ wave: 5, kills: 9 }, { wave: 5, kills: 9 }) &&
+      !isBetterRecord({ wave: 4, kills: 99 }, { wave: 5, kills: 0 }) &&
+      isBetterRecord({ wave: 1, kills: 0 }, null)); // 首战即纪录
+  }
+  {
+    // 刷点：避墙 + 不贴脸 + 朝远端偏。medium 档 30 张图逐张验。
+    const { cols, rows } = MAZE_TIERS.medium;
+    let wallOk = true, farOk = true, nullCount = 0;
+    for (let t = 0; t < 30; t++) {
+      const mz = generateMaze(cols, rows, ["sparse", "symmetric", "rooms"][t % 3]);
+      const hero = { x: CELL_SIZE * 0.5, y: CELL_SIZE * 0.5 };            // 玩家在左上角
+      const occupied = [hero, { x: CELL_SIZE * 1.5, y: CELL_SIZE * 0.5 }]; // 再放一辆挡着
+      const spot = pickSpawnSpot(mz, hero, occupied, () => 0.5);
+      if (!spot) { nullCount++; continue; }
+      // 落点不嵌墙（resolveCircleWalls 推不动）
+      const fixed = resolveCircleWalls(spot.x, spot.y, TANK.radius, mz.walls);
+      if (Math.hypot(fixed.x - spot.x, fixed.y - spot.y) > 0.5) wallOk = false;
+      // 不贴脸：至少 1 格（最松那级闸门）
+      if (occupied.some((o) => Math.hypot(o.x - spot.x, o.y - spot.y) < CELL_SIZE)) wallOk = false;
+      // 偏远端：玩家在左上，刷点该落在右下半区（超过对角线一半）
+      if (Math.hypot(spot.x - hero.x, spot.y - hero.y) < Math.hypot(cols, rows) * CELL_SIZE * 0.4) farOk = false;
+    }
+    check("刷点避墙、不贴脸、偏离玩家", wallOk && farOk && nullCount === 0, `null=${nullCount}/30`);
+  }
+  {
+    // 极端场景：满场坦克塞住所有安全距 → 允许放宽，但绝不返回墙里的点
+    const mz = generateMaze(MAZE_TIERS.small.cols, MAZE_TIERS.small.rows, "sparse");
+    const all = [];
+    for (let cy = 0; cy < mz.rows; cy++) {
+      for (let cx = 0; cx < mz.cols; cx++) all.push({ x: (cx + 0.5) * CELL_SIZE, y: (cy + 0.5) * CELL_SIZE });
+    }
+    const spot = pickSpawnSpot(mz, all[0], all, () => 0);
+    check("全图被占时返回 null 而不是墙里的点", spot === null);
   }
 }
 

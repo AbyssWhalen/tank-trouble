@@ -17,7 +17,7 @@
 import {
   CANVAS, PLAYER_COLORS, KEY_BINDINGS, MAZE_TIERS, TIER_POOL_BY_MODE,
   WALL, CELL_SIZE, BULLET, TANK, THEME, ROUND_RESTART_DELAY,
-  POWERUP, PICKUP_RATE, MATCH_TARGET, ROUND_INTRO, SLOWMO, STYLE_POOL_BY_MODE,
+  POWERUP, PICKUP_RATE, MATCH_TARGET, ROUND_INTRO, SLOWMO, STYLE_POOL_BY_MODE, WAVE,
 } from "./config.js";
 import { Player } from "./player.js";
 import { generateMaze, destroyWallsInRadius, destroyWallSegments } from "./maze.js";
@@ -36,9 +36,9 @@ import {
 import {
   renderMenu, renderPauseOverlay, renderHud, renderRoundOverBanner,
   renderMatchOverBanner, renderRebindOverlay, renderSettingsOverlay, renderCountdown,
-  renderLevelSelectOverlay, renderLevelOverBanner,
+  renderLevelSelectOverlay, renderLevelOverBanner, renderWaveOverBanner,
   menuAction, pauseAction, rebindAction, settingsAction, matchOverAction,
-  levelSelectAction, levelOverAction, keyLabel,
+  levelSelectAction, levelOverAction, waveOverAction, keyLabel,
 } from "./ui.js";
 import {
   initSettings, saveBindings, resetBindings,
@@ -46,8 +46,13 @@ import {
   loadAudioMuted, saveAudioMuted,
   loadWallBreak, saveWallBreak,
   loadChallengeProgress, saveChallengeProgress,
+  loadWaveBest, saveWaveBest,
 } from "./settings.js";
 import { LEVELS, LEVEL_COUNT, evaluateObjective, normalizeProgress } from "./levels.js";
+import {
+  waveSpec, pickEnemyLevel, shouldRemap, pickSpawnSpot,
+  normalizeWaveBest, isBetterRecord,
+} from "./waves.js";
 import { initAudio, playSfx, toggleMuted, isMuted } from "./audio.js";
 import {
   loadStats, saveStats, getStats, accuracy, favoriteWeapon,
@@ -93,7 +98,7 @@ initAudio(loadAudioMuted() ?? false);
 loadStats();
 
 // —— 游戏状态机 ——
-const STATE = { MENU: "menu", PLAYING: "playing", PAUSED: "paused", ROUND_OVER: "round_over", MATCH_OVER: "match_over", LEVEL_OVER: "level_over" };
+const STATE = { MENU: "menu", PLAYING: "playing", PAUSED: "paused", ROUND_OVER: "round_over", MATCH_OVER: "match_over", LEVEL_OVER: "level_over", WAVE_OVER: "wave_over" };
 let state = STATE.MENU;
 
 // —— 对局状态 ——
@@ -118,7 +123,7 @@ let matchStatsBase = null;     // 本场统计基线（startMatch 快照，横�
 let introTimer = 0;            // 回合开场倒计时（秒）：>0 时双方全冻结（含 AI 决策）
 let goTimer = 0;               // "GO!" 余像计时（解冻后纯视觉）
 let slowmoTimer = 0;           // 击杀慢动作剩余（真实秒）：>0 时游戏 dt × SLOWMO.scale
-let pendingLevelSlowmo = false; // 关卡模式：本帧有击杀，胜负段确认终局后才转正为慢镜
+let pendingSoloSlowmo = false; // 单人模式（挑战/波次）：本帧有击杀，胜负段确认终局后才转正为慢镜
 
 // —— 挑战关卡模式状态 ——
 let currentLevelIndex = 0;     // 当前在打第几关（LEVELS 下标）
@@ -126,6 +131,18 @@ let challengeProgress = normalizeProgress(loadChallengeProgress() ?? 0); // 已�
 let levelTimer = 0;            // 关卡计时：survive 累加 / eliminateTimed 倒数（游戏秒）
 let levelWallBreak = false;    // 本关地形破坏开关（关卡表指定，覆写全局）
 let levelOutcome = null;       // LEVEL_OVER 时 "win" | "lose"
+
+// —— 无尽波次生存状态（阶段 24）——
+// 敌人来去无常：死敌当帧从 players 移除（players[0] 恒为玩家），于是
+// 「场上敌数 = players.length - 1」，颜色槽位也能回收（PLAYER_COLORS 只有 4 色，
+// 0 号是玩家的青绿 → 同屏上限 3 就是这么来的）。曲线在 waves.js，这里只存进度。
+let waveNo = 0;                // 当前波次（1-based；0=未开局）
+let waveKills = 0;             // 本次生存累计击杀
+let waveQuotaLeft = 0;         // 本波还没投放的敌人数（投放即减，与场上存活无关）
+let waveGapTimer = 0;          // 波间空场喘息（秒）：不冻结，玩家可趁机捡补给/占位
+let waveBest = normalizeWaveBest(loadWaveBest()); // 历史最高 { wave, kills }
+let waveNewRecord = false;     // 本次是否破纪录（结算横幅提示用）
+
 let aiLevel = "normal";        // 选中的 AI 难度档（菜单 chip 单选），开局/R 重开沿用
 // 启用的道具类型集合（菜单多选 chip；空集=整局无道具）。
 // 初始从 localStorage 读上次组合，没存过默认全启;变化即写盘。
@@ -133,6 +150,9 @@ let enabledPowerups = new Set(loadEnabledPowerups() ?? POWERUP.types);
 let wallBreakEnabled = loadWallBreak() ?? true; // 地雷炸墙开关（菜单「地形」chip，默认开）
 // 本局实际生效的地形破坏（关卡模式由关卡表覆写，不动全局设置）
 const wallBreakActive = () => (currentMode === "challenge" ? levelWallBreak : wallBreakEnabled);
+// 单人模式（挑战/波次）：players 长度可变、战绩口径与 1v1 不同 →
+// 不进终身统计（stats.players 定长 2，第三车会越界），慢镜只在终局（见 pendingSoloSlowmo）
+const soloMode = () => currentMode === "challenge" || currentMode === "wave";
 let showHelp = false;          // 玩法说明浮窗是否显示（叠在菜单上的浮层）
 
 // —— 键位设置面板状态（菜单子状态）——
@@ -151,15 +171,28 @@ window.__devHook = {
   snapshot: () => ({ state, matchScores: [...matchScores], winnerIndex: winner ? winner.index : null }),
   forceScores: (a, b) => { matchScores = [a, b]; },
   setTank: (i, patch) => { if (players[i]) Object.assign(players[i].tank, patch); },
+  // setTank 的只读对偶：验证「某个状态下人还能不能动」需要能读位置（如波间喘息不冻结）
+  tankAt: (i) => {
+    const t = players[i]?.tank;
+    return t ? { x: t.x, y: t.y, angle: t.angle, alive: t.alive } : null;
+  },
   wallCount: () => (maze ? maze.walls.length : 0),
   erodedCount: () => (maze ? maze.walls.filter((w) => !w.border && w.hp < WALL.hp).length : 0),
+  // 场上实体计数：验证「每波开局强制补给」与「雷阵跨波保留」都要能数场上的东西
+  fieldCount: () => ({ powerups: powerups.length, mines: mines.length, bullets: bullets.length }),
   skipCountdown: () => { introTimer = 0; },
   introLeft: () => introTimer,
   slowmoLeft: () => slowmoTimer,
   statsSnapshot: () => JSON.parse(JSON.stringify(getStats())),
   levelState: () => ({ index: currentLevelIndex, progress: challengeProgress, outcome: levelOutcome, timer: levelTimer }),
   forceUnlock: (n) => { challengeProgress = normalizeProgress(n); saveChallengeProgress(challengeProgress); },
-  winLevel: () => { for (const p of players.slice(1)) p.tank.alive = false; }, // 歼灭关直接过
+  winLevel: () => { for (const p of players.slice(1)) p.tank.alive = false; }, // 歼灭关直接过（波次清场同用）
+  waveState: () => ({
+    wave: waveNo, kills: waveKills, quotaLeft: waveQuotaLeft,
+    enemies: players.length - 1, gap: waveGapTimer, best: { ...waveBest }, newRecord: waveNewRecord,
+  }),
+  // 快进到第 n 波（跳过前面的慢热，专测换图/large 档/同屏上限）
+  forceWave: (n) => { if (currentMode === "wave") beginWave(Math.max(1, n | 0)); },
   blastAt: (x, y) => {
     // 直接触发一次炸墙结算（跳过地雷实体，专测破墙链路：几何/特效/音效/开关）
     if (!maze || !wallBreakEnabled) return 0;
@@ -181,27 +214,12 @@ function startMatch(mode) {
   setupRound(mode);
 }
 
-// 开一局：按模式从档位池随机抽一档地图，生成随机布局与玩家。
-// 缩放偏移由 fitArena 算（小图原样、大图等比缩小并居中），每回合重抽换图。
-// challenge 模式：地图/敌人/道具/地形全部由关卡表确定性指定（不随机）。
-function setupRound(mode) {
-  currentMode = mode;
-
-  let cols, rows;
-  const level = mode === "challenge" ? LEVELS[currentLevelIndex] : null;
-  if (level) {
-    ({ cols, rows } = MAZE_TIERS[level.map.tier]);
-    maze = generateMaze(cols, rows, level.map.style);
-  } else {
-    // 从该模式的档位池随机抽一档（pvp/pve → small|medium）
-    const pool = TIER_POOL_BY_MODE[mode] || TIER_POOL_BY_MODE.pvp;
-    const tier = pool[Math.floor(Math.random() * pool.length)];
-    ({ cols, rows } = MAZE_TIERS[tier]);
-    // 风格与档位正交，各自随机抽（每回合换图+换风格，重复感立减）
-    const stylePool = STYLE_POOL_BY_MODE[mode] || STYLE_POOL_BY_MODE.pvp;
-    const style = stylePool[Math.floor(Math.random() * stylePool.length)];
-    maze = generateMaze(cols, rows, style);
-  }
+// 生成地图 + 算自适应缩放 + 返回四角出生位。
+// setupRound 与波次换图（remapWaveArena）共用——档位/风格由调用方定：
+// 关卡表确定性指定 / pvp·pve 模式池随机抽 / 波次由曲线给。
+function buildArena(tier, style) {
+  const { cols, rows } = MAZE_TIERS[tier];
+  maze = generateMaze(cols, rows, style);
 
   // 自适应缩放 + 居中：把竞技场世界尺寸喂给 fitArena
   const fit = fitArena(cols * CELL_SIZE, rows * CELL_SIZE);
@@ -211,12 +229,39 @@ function setupRound(mode) {
 
   const half = CELL_SIZE / 2;
   // 四角出生位（tl 恒给玩家；关卡表 enemies[].spawn 取其余三角）
-  const corner = {
+  return {
     tl: { x: half, y: half, a: 0 },
     tr: { x: (cols - 1) * CELL_SIZE + half, y: half, a: Math.PI },
     bl: { x: half, y: (rows - 1) * CELL_SIZE + half, a: 0 },
     br: { x: (cols - 1) * CELL_SIZE + half, y: (rows - 1) * CELL_SIZE + half, a: Math.PI },
   };
+}
+
+// 从模式的风格池随机抽一种（与档位正交，各自随机 → 每回合换图+换风格）
+function pickStyle(mode) {
+  const pool = STYLE_POOL_BY_MODE[mode] || STYLE_POOL_BY_MODE.pvp;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+// 开一局：按模式从档位池随机抽一档地图，生成随机布局与玩家。
+// 缩放偏移由 fitArena 算（小图原样、大图等比缩小并居中），每回合重抽换图。
+// challenge 模式：地图/敌人/道具/地形全部由关卡表确定性指定（不随机）。
+// wave 模式：档位由波次曲线确定性给，敌人不预生成（交给波次调度投放）。
+function setupRound(mode) {
+  currentMode = mode;
+
+  const level = mode === "challenge" ? LEVELS[currentLevelIndex] : null;
+  let corner;
+  if (level) {
+    corner = buildArena(level.map.tier, level.map.style);
+  } else if (mode === "wave") {
+    // 波次：档位是难度（曲线确定性给，第 11 波起 large），风格仍是花样（随机）
+    corner = buildArena(waveSpec(1).tier, pickStyle(mode));
+  } else {
+    // 从该模式的档位池随机抽一档（pvp/pve → small|medium）
+    const pool = TIER_POOL_BY_MODE[mode] || TIER_POOL_BY_MODE.pvp;
+    corner = buildArena(pool[Math.floor(Math.random() * pool.length)], pickStyle(mode));
+  }
 
   if (level) {
     // 关卡模式：玩家 tl + 按表生成 n 个 AI 敌人
@@ -237,6 +282,14 @@ function setupRound(mode) {
     levelWallBreak = !!level.wallBreak; // 关卡覆写，不动全局设置
     // 关卡计时：survive 从 0 数上去；eliminateTimed 从上限倒数；其余不用
     levelTimer = level.objective === "eliminateTimed" ? level.mutators.timeLimit : 0;
+  } else if (mode === "wave") {
+    // 波次生存：玩家一人 tl 起手，敌人一个都不预生成——全部交给波次调度按
+    // 同屏上限逐个投放（见 updateWaveFlow），压力才是渐进的而不是开场一锅端。
+    players = [new Player(0, PLAYER_COLORS[0], KEY_BINDINGS[0], corner.tl.x, corner.tl.y, 0)];
+    // 道具沿用玩家自己的菜单设置（不像关卡那样锁定），全关则整局无道具
+    spawner = new PowerupSpawner(POWERUP.types.filter((t) => enabledPowerups.has(t)));
+    waveKills = 0;
+    waveNewRecord = false;
   } else {
     // P1 左上角格朝右，P2 右下角格朝左，初始背对，给彼此反应空间。
     // pve 模式 P2 是 AI：keys=null + isAI=true，Player 内建 AiController。
@@ -256,7 +309,9 @@ function setupRound(mode) {
   powerups = [];
   mines = [];
   winner = null;
-  pendingLevelSlowmo = false;
+  pendingSoloSlowmo = false;
+  // 波次第 1 波必须等实体数组清空后再起（开波补给要 push 进新的 powerups）
+  if (mode === "wave") beginWave(1);
   introTimer = ROUND_INTRO.beat * 3; // 3-2-1 三拍冻结开场
   goTimer = 0;
   playSfx("countTick"); // 第一拍「3」（后续换拍音在 updatePlaying 的门里）
@@ -297,6 +352,9 @@ function update(dt) {
       break;
     case STATE.LEVEL_OVER:
       updateLevelOver(dt);
+      break;
+    case STATE.WAVE_OVER:
+      updateWaveOver(dt);
       break;
   }
   endFrame();
@@ -482,7 +540,7 @@ function findBindingConflict(code) {
 
 // 统一命中结算（阶段 23 抽出）：有盾消盾、无盾击杀——子弹/散射/激光/地雷共用。
 // weapon 用于统计归类；killerTank 用于排除自伤统计。慢动作与统计的
-// 模式分流集中在这一处（关卡模式多敌人：非终局击杀不慢镜、不进终身统计）。
+// 模式分流集中在这一处（单人模式多敌人：非终局击杀不慢镜、不进终身统计）。
 // 返回 true=击杀成功，false=被盾挡下。
 function hitPlayer(p, weapon, killerTank) {
   const killerIndex = players.findIndex((pp) => pp.tank === killerTank);
@@ -492,16 +550,18 @@ function hitPlayer(p, weapon, killerTank) {
     effects.push(new ShieldBreak(p.tank.x, p.tank.y, THEME.shieldRing));
     addShake(3, 0.2);
     playSfx("shieldBreak");
-    if (currentMode !== "challenge" && killerIndex >= 0 && killerTank !== p.tank) recordHit(killerIndex);
+    if (!soloMode() && killerIndex >= 0 && killerTank !== p.tank) recordHit(killerIndex);
     return false;
   }
   p.tank.alive = false;
   effects.push(new TankExplosion(p.tank.x, p.tank.y, p.color));
   addShake(5, 0.3);
   playSfx("kill");
-  if (currentMode !== "challenge") slowmoTimer = SLOWMO.duration; // 1v1 任何击杀=终杀
-  else pendingLevelSlowmo = true; // 关卡模式：是否终局由胜负段确认后再慢镜
-  if (currentMode !== "challenge" && killerIndex >= 0 && killerTank !== p.tank) recordKill(killerIndex, weapon);
+  if (!soloMode()) slowmoTimer = SLOWMO.duration; // 1v1 任何击杀=终杀
+  else pendingSoloSlowmo = true; // 单人模式：是否终局由胜负段确认后再慢镜
+  if (!soloMode() && killerIndex >= 0 && killerTank !== p.tank) recordKill(killerIndex, weapon);
+  // 波次战绩：敌人被击破就 +1（含互相误伤/踩雷——场是你控的，算你的）
+  if (currentMode === "wave" && p !== players[0]) waveKills++;
   return true;
 }
 
@@ -613,12 +673,12 @@ function updatePlaying(dt) {
     if (res.bullets.length > 0) {
       effects.push(new MuzzleFlash(res.bullets[0].x, res.bullets[0].y, players[i].tank.angle));
       playSfx(res.bullets.length > 1 ? "shootScatter" : "shoot"); // 散射一炮一个音
-      // 关卡模式不进终身统计（stats.players 定长 2，第三车会越界；口径也不同）
-      if (currentMode !== "challenge") recordFired(i, res.bullets.length);
+      // 单人模式不进终身统计（stats.players 定长 2，第三车会越界；口径也不同）
+      if (!soloMode()) recordFired(i, res.bullets.length);
     }
     for (const b of res.bullets) bullets.push(b); // kind 已由 tank.spawnBullet 打好
     if (res.laser) {
-      if (currentMode !== "challenge") recordFired(i, 1);
+      if (!soloMode()) recordFired(i, 1);
       fireLaser(res.laser, players[i]); // 补传射手，击杀归属统计
     }
 
@@ -663,7 +723,18 @@ function updatePlaying(dt) {
   for (const pw of powerups) pw.update(dt);
   updateEffects(dt);
 
+  // 6.5) 波次生存专属：死敌当帧移出 players。敌人来去无常，留着尸体会让
+  //      AI 世界视图与碰撞遍历越攒越长，颜色槽位也回收不了（只有 3 个可用）。
+  //      爆炸是独立特效实体（已入 effects），移除不影响演出；它生前射出的
+  //      子弹与布下的雷仍在场——owner 是坦克引用，不随 Player 出列而失效。
+  if (currentMode === "wave") players = players.filter((p, i) => i === 0 || p.alive);
+
   // 7) 胜负判定
+  if (currentMode === "wave") {
+    updateWaveFlow(dt);
+    return;
+  }
+
   if (currentMode === "challenge") {
     // 关卡模式：目标判定（1v2 下「存活≤1」语义错误——玩家死后 AI 会互殴）。
     // 关卡计时推进：survive 累加、eliminateTimed 倒数（用游戏时间，慢镜时同步慢——公平）
@@ -675,9 +746,9 @@ function updatePlaying(dt) {
       enemiesAlive: players.filter((p, i) => i > 0 && p.alive).length,
       levelTimer,
     });
-    if (pendingLevelSlowmo) {
+    if (pendingSoloSlowmo) {
       if (outcome) slowmoTimer = SLOWMO.duration; // 终局击杀才慢镜
-      pendingLevelSlowmo = false;
+      pendingSoloSlowmo = false;
     }
     if (outcome) {
       levelOutcome = outcome;
@@ -826,6 +897,114 @@ function updateLevelOver(dt) {
   }
 }
 
+// ============================================================
+// 无尽波次生存（阶段 24）：一条命打无限波，看能活到第几波。
+// 曲线全在 waves.js（纯函数），这里只做调度四件事：投放 / 清波 / 换图 / 结算。
+// ============================================================
+
+// 进入第 n 波：置配额 + 章节边界换图 + 开波强制补给。
+// 敌人不在这里一锅端投放——由 updateWaveFlow 按同屏上限逐辆补，压力才是渐进的。
+function beginWave(n) {
+  waveNo = n;
+  const spec = waveSpec(n);
+  waveQuotaLeft = spec.quota;
+  waveGapTimer = 0;
+  if (shouldRemap(n)) remapWaveArena();   // 章节换图（内含 3-2-1 冻结）
+  else if (n > 1) playSfx("countTick");   // 新一波来袭的轻提示
+  // 开波补给：强制刷 spec.supply 个。maxOnField 是全局常量，spawner 内部自己守，
+  // 刷不满就是刷不满（场上还有没捡的），不特意为波次抬上限。
+  const tanks = players.filter((p) => p.alive).map((p) => p.tank);
+  for (let i = 0; i < spec.supply; i++) spawner.forceSpawn(maze, powerups, tanks);
+}
+
+// 章节换图（每 WAVE.remapEvery 波，且只在空场的波次边界发生）：
+// 新图 + 玩家挪回 tl + 清场上实体，但**保留玩家坦克本体**——武器槽与护盾
+// 是上一章打出来的战果，不该被换图没收（挪坐标即可，零状态搬运代码）。
+// 3-2-1 冻结复用 introTimer，给玩家看清新地形的时间。
+function remapWaveArena() {
+  const corner = buildArena(waveSpec(waveNo).tier, pickStyle("wave"));
+  const hero = players[0];
+  hero.tank.x = corner.tl.x;
+  hero.tank.y = corner.tl.y;
+  hero.tank.angle = corner.tl.a;
+  players = [hero];   // 旧图上不该有残敌（换图在空场边界），保险起见一并清掉
+  bullets = [];
+  effects = [];
+  powerups = [];
+  mines = [];
+  introTimer = ROUND_INTRO.beat * 3;
+  goTimer = 0;
+}
+
+// 投放一辆敌人：颜色槽位取当前空闲的 1..3（0 号是玩家的青绿，所以同屏上限 3），
+// 位置取离玩家最远的空格（pickSpawnSpot），出生朝向对着玩家（别对着墙发呆）。
+function spawnWaveEnemy(spec) {
+  const hero = players[0].tank;
+  const used = new Set(players.slice(1).map((p) => p.index));
+  let slot = 1;
+  while (used.has(slot) && slot < PLAYER_COLORS.length - 1) slot++;
+  const spot = pickSpawnSpot(maze, hero, players.filter((p) => p.alive).map((p) => p.tank));
+  if (!spot) return; // 图太挤（理论上不会）：本帧跳过，下帧再试
+  const level = pickEnemyLevel(spec.mix);
+  const angle = Math.atan2(hero.y - spot.y, hero.x - spot.x);
+  players.push(new Player(slot, PLAYER_COLORS[slot], null, spot.x, spot.y, angle, true, level));
+  waveQuotaLeft--;
+}
+
+// 每帧波次调度（updatePlaying 段 7 的 wave 分支，早退不落到 pvp 结算）
+function updateWaveFlow(dt) {
+  // 玩家死 = 本次生存结束（场上还剩几辆敌人不再关心）
+  if (!players[0].alive) {
+    if (pendingSoloSlowmo) {
+      slowmoTimer = SLOWMO.duration; // 只有终局这一杀值得慢镜
+      pendingSoloSlowmo = false;
+    }
+    const rec = { wave: waveNo, kills: waveKills };
+    waveNewRecord = isBetterRecord(rec, waveBest);
+    if (waveNewRecord) {
+      waveBest = normalizeWaveBest(rec);
+      saveWaveBest(waveBest);
+    }
+    state = STATE.WAVE_OVER;
+    playSfx(waveNewRecord ? "matchWin" : "roundDraw");
+    return;
+  }
+  pendingSoloSlowmo = false; // 打掉敌人是波次里的日常，一局几十个，不给慢镜
+
+  const enemiesAlive = players.length - 1; // 死敌已在段 6.5 出列，这个数是精确的
+  if (waveGapTimer > 0) {
+    // 波间喘息：**不冻结**——玩家保有控制权，可趁空场捡补给、挪到有利位置。
+    // （只有章节换图才冻结，因为那时地形全变、人也被挪走了）
+    waveGapTimer = Math.max(0, waveGapTimer - dt);
+    if (waveGapTimer === 0) beginWave(waveNo + 1);
+    return;
+  }
+  if (waveQuotaLeft <= 0 && enemiesAlive === 0) {
+    waveGapTimer = WAVE.gap; // 本波清空，进喘息
+    playSfx("roundWin");
+    return;
+  }
+  // 场上不满同屏上限且配额有余 → 补一辆（一帧只补一辆，避免同点挤压）
+  const spec = waveSpec(waveNo);
+  if (enemiesAlive < spec.concurrent && waveQuotaLeft > 0) spawnWaveEnemy(spec);
+}
+
+// 波次结算：无自动倒计时（照 LEVEL_OVER 范式）。R/按钮重来，Esc/按钮回菜单。
+function updateWaveOver(dt) {
+  updateEffects(dt); // 终局爆炸播完
+
+  let choice = null;
+  if (isJustPressed("KeyR")) choice = "retry";
+  else if (isJustPressed("Escape")) choice = "menu";
+  else if (isClicked()) {
+    choice = waveOverAction(getMousePos().x, getMousePos().y);
+    if (choice) playSfx("uiClick");
+  }
+
+  if (choice === "retry") setupRound("wave");
+  else if (choice === "menu") state = STATE.MENU;
+}
+
 // 推进所有特效 + 屏幕震动，播完的移除。PLAYING 与 ROUND_OVER 共用。
 function updateEffects(dt) {
   updateShake(dt);
@@ -907,6 +1086,13 @@ function render() {
         mouse: getMousePos(),
       });
       break;
+    case STATE.WAVE_OVER:
+      renderArena();
+      renderWaveOverBanner(ctx, {
+        wave: waveNo, kills: waveKills, best: waveBest,
+        newRecord: waveNewRecord, mouse: getMousePos(),
+      });
+      break;
   }
 }
 
@@ -972,6 +1158,14 @@ function renderArena() {
       timer: LEVELS[currentLevelIndex].objective === "survive"
         ? Math.max(0, (LEVELS[currentLevelIndex].mutators.surviveTime ?? 0) - levelTimer)
         : (LEVELS[currentLevelIndex].objective === "eliminateTimed" ? levelTimer : null),
+    } : null,
+    // 波次模式右侧同样走聚合显示（第 N 波/场上敌/本波剩余/击杀），与 challenge 槽同路子
+    wave: currentMode === "wave" ? {
+      wave: waveNo,
+      enemiesAlive: players.length - 1,
+      left: waveQuotaLeft,
+      kills: waveKills,
+      gap: waveGapTimer,
     } : null,
   });
 }

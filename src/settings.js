@@ -15,7 +15,8 @@
 //     powerups: ["scatter", ...],  // 菜单启用的道具类型
 //     audio: { muted: false },     // 音效静音开关
 //     wallBreak: true,             // 地雷炸墙开关（菜单「地形」chip）
-//     challenge: 0                 // 挑战模式已通关数（0=从头开始）
+//     challenge: 0,                // 挑战模式已通关数（0=从头开始）
+//     waveBest: { wave, kills }    // 波次生存最高记录（wave=0 视为无记录）
 //   }
 // ============================================================
 
@@ -126,4 +127,17 @@ export function loadChallengeProgress() {
 // 过关时写盘
 export function saveChallengeProgress(n) {
   writeStore({ challenge: n });
+}
+
+// 读波次生存最高记录：没存过/非法返回 null（调用方交给 normalizeWaveBest 落 0）。
+// 这里只做「是不是个对象」的粗筛，字段校验归 waves.normalizeWaveBest 一处管。
+export function loadWaveBest() {
+  const data = readStore();
+  if (!data || typeof data.waveBest !== "object" || !data.waveBest) return null;
+  return data.waveBest;
+}
+
+// 破纪录时写盘（是否破纪录由 waves.isBetterRecord 判，这里只负责落地）
+export function saveWaveBest(rec) {
+  writeStore({ waveBest: { wave: rec.wave | 0, kills: rec.kills | 0 } });
 }

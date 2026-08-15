@@ -8,7 +8,7 @@ Local multiplayer tank combat game with procedural maze generation, bullet ricoc
 
 ## 游戏特色 | Features
 
-- 🎮 **双人对战 + 人机 + 挑战闯关** | PvP, PvE & single-player challenge campaign (8 levels)
+- 🎮 **双人对战 + 人机 + 挑战闯关 + 波次生存** | PvP, PvE, single-player challenge campaign (8 levels) & endless wave survival
 - 🗺️ **随机迷宫·三种风格轮换** | Procedural mazes in 3 styles (sparse grid / mirrored arena / rooms & corridors) × 3 size tiers
 - 💥 **子弹反弹物理** | Realistic bullet ricochet off walls
 - 🎁 **四种道具·菜单可自选组合** | 4 power-ups, individually toggleable:
@@ -28,6 +28,7 @@ Local multiplayer tank combat game with procedural maze generation, bullet ricoc
 - ✨ **手感特效** | Screen shake, muzzle flash, bullet trails & explosions
 - 🔊 **程序合成音效·零素材文件** | Procedurally synthesized SFX (Web Audio, zero asset files), mute toggle persisted
 - 🎯 **局胜制·先到 5 分赢下整场** | First to 5 rounds wins the match
+- ♾️ **波次生存·一条命打到底** | Endless wave survival: one life, waves of AI that grow in count & skill, forced supply drop between waves, arena remapped (and sized up) every 5 waves — your bullet holes and mines carry over inside a chapter; personal best persisted
 - ⏱️ **开场倒计时 + 击杀慢动作 + 战绩统计** | Round countdown, kill slow-mo & persistent stats
 - 📟 **HUD 武器状态指示** | On-HUD weapon & shield badges with ammo counts
 - 📐 **自适应窗口** | Responsive viewport scaling
@@ -104,6 +105,7 @@ tank-trouble/
 │   ├── ui.js         # 菜单/HUD/浮层 | Menus, HUD & overlays
 │   ├── ai.js         # AI 控制器 | AI controller
 │   ├── levels.js     # 挑战关卡表 | Challenge campaign levels
+│   ├── waves.js      # 波次曲线 | Endless wave curve
 │   ├── maze.js       # 迷宫生成 | Maze generation
 │   ├── tank.js       # 坦克物理 | Tank physics
 │   ├── bullet.js     # 子弹 + 反弹 | Bullet & ricochet
@@ -115,7 +117,7 @@ tank-trouble/
 │   ├── settings.js   # 设置持久化 | Settings persistence
 │   ├── collision.js  # 碰撞检测 | Collision detection
 │   └── effects.js    # 视觉特效 | Visual effects
-├── scripts/          # 冒烟测试 + AI 对打/关卡跑分 | Smoke tests, AI arena & level scorer (npm run smoke / arena)
+├── scripts/          # 冒烟测试 + AI 对打/关卡/波次跑分 | Smoke tests, AI arena, level & wave scorers (npm run smoke / arena)
 ├── electron/         # Electron 主进程 | Electron main process
 └── index.html        # 渲染进程入口 | Renderer entry
 ```
@@ -156,6 +158,7 @@ Zero runtime dependencies, pure frontend implementation.
 - **阶段 21**：地图生成器三风格——稀疏格栅 / 180° 对称竞技场（绝对公平）/ 房间走廊（BSP），每回合随机轮换
 - **阶段 22**：AI 行为大修——修复隔墙对撞死锁（半径感知导航）、十余项决策 bug；hard 档学会磨墙开路；卡住次数降一个数量级
 - **阶段 23**：挑战关卡模式——单人闯关 8 关（1v2 车轮战/激光狙击/限时歼灭/生存），顺序解锁，进度持久化
+- **阶段 24**：无尽波次生存——一条命打无限波，配额/同屏双层调度（同屏最多 3 敌），AI 难度随波次从简单滑向困难，每波强制补给，每 5 波换图升档（第 11 波起上 large 大图），破洞与雷阵在章节内跨波保留，历史最高（波次/击杀）持久化
 
 ---
 

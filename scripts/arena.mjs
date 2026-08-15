@@ -3,6 +3,7 @@
 // 用途一：AI 改动的量化验证。CLAUDE.md 验证纪律：AI 调参/行为改动
 //         以「同档新旧对打」的胜率对比为准（跨档胜率无参考意义）。
 // 用途二：挑战关卡的难度曲线验证（--challenge）——AI 替身代打各关出通关率。
+// 用途三：无尽波次生存的曲线验证（--waves）——AI 替身代打，出「活到第几波」分布。
 //
 // 如实复刻 main.js updatePlaying 的结算顺序（控制→移动→车距分离→
 // 道具刷新拾取→地雷引爆→开火/激光结算/布雷→子弹运动→击中判定→胜负），
@@ -17,6 +18,10 @@
 //   node scripts/arena.mjs --challenge                    # 挑战关卡全关跑分（每关 30 次）
 //   node scripts/arena.mjs --challenge 8 --tries 50       # 只跑第 8 关，50 次
 //   node scripts/arena.mjs --challenge --proxy hard       # 换玩家位替身档位（默认 normal）
+//   node scripts/arena.mjs --waves --tries 30             # 波次生存代打 30 次，出到达波次分布
+//   node scripts/arena.mjs --waves --startwave 8          # 空降第 8 波起跑（量单波致死率）
+//   node scripts/arena.mjs --waves --maxwave 40           # 抬高波次封顶（默认 30，防替身活太久）
+//   node scripts/arena.mjs --waves --wavegap 1.5          # 波间喘息（默认 0，见 WAVE_GAP 注释）
 // 注意：挂仓库外的 AI 模块副本时，其相对 import 需先改写为绝对 file:// 路径
 // （git show 旧版本后用 sed 替换，见 CLAUDE.md）。
 // ============================================================
@@ -32,9 +37,10 @@ import {
   circleVsCircle, separateCircles, resolveCircleWalls, closestPointOnSegment,
 } from "../src/collision.js";
 import {
-  CELL_SIZE, TANK, BULLET, POWERUP, MAZE_TIERS, TIER_POOL_BY_MODE, STYLE_POOL_BY_MODE,
+  CELL_SIZE, TANK, BULLET, POWERUP, MAZE_TIERS, TIER_POOL_BY_MODE, STYLE_POOL_BY_MODE, WAVE,
 } from "../src/config.js";
 import { LEVELS, evaluateObjective } from "../src/levels.js";
+import { waveSpec, pickEnemyLevel, shouldRemap, pickSpawnSpot } from "../src/waves.js";
 
 // —— 参数解析（--key value 形式，全部可选；后面没跟值的当开关 true）——
 const argv = process.argv.slice(2);
@@ -59,6 +65,21 @@ const STYLE = opt.style ?? "sparse";
 const ERODE = opt.wallbreak !== "off";
 // 挑战关卡跑分：true=全关 / "5"=只跑第 5 关（1-based，同关卡 id）
 const CHALLENGE = opt.challenge ?? null;
+// 波次生存跑分（--waves）：AI 替身代打，看能活到第几波
+const WAVES = opt.waves ?? null;
+const MAXWAVE = Number(opt.maxwave ?? 30); // 波次封顶：替身活太久就收，别把跑分变成挂机
+const CHAPTER_SECS = Number(opt.chaptersecs ?? 60); // 每波给的模拟秒数预算（一章 ×remapEvery）
+// 起始波号（默认 1 = 从头打）。>1 时是「空降第 N 波」——一条命的模式里
+// 无条件分布会被逐场胜率的几何衰减吃干（替身对同档 AI 约 5 成，打到第 5 波要连赢
+// 十几场），所以单波致死率得靠空降采样才量得出来。
+const STARTWAVE = Math.max(1, Number(opt.startwave ?? 1));
+// 波间喘息（秒）。**arena 默认压到 0，与实机的 WAVE.gap 有意不同**：ai.js 在
+// 场上没有活敌时直接 return idle（见 ai.js 的「没有则待机」），替身于是在空场
+// 里一动不动，被自己刚打出去还在跳的子弹打死——实测 20 次里 16 次死在清完第
+// 1 波之后的那 1.5s（杀 1 / 3s，场上零敌）。人类玩家在喘息里照样会躲，这纯粹
+// 是替身的行为缺陷，不是波次曲线的难度。压到 0 让替身全程有目标；
+// --wavegap 1.5 可复现该伪影量级。
+const WAVE_GAP = Number(opt.wavegap ?? 0);
 const TRIES = Number(opt.tries ?? 30);      // 每关代打次数
 const PROXY = opt.proxy ?? "normal";        // 玩家位 AI 替身的难度档
 
@@ -89,9 +110,10 @@ function corners(cols, rows) {
 
 // 通用 headless 模拟核心：逐帧推进到 verdict 收场或超时。竞技场对打与关卡
 // 跑分共用这一份——两份结算副本必然各自跑偏，改 main 的结算只需同步这里。
-//   actors  [{ side, tank, alive, ctrl }]，参与者数量不限（关卡有 1v2）
+//   actors  [{ side, tank, alive, ctrl }]，参与者数量不限（关卡有 1v2）。
+//           onFrame 里可原地增删（波次投放/出列），不可重新赋值。
 //   erode   地形破坏开关（子弹磨墙 + 地雷炸墙，对应 main.wallBreakActive）
-//   onFrame 每帧钩子（关卡计时用），在胜负判定之前调用
+//   onFrame 每帧钩子 (dt, { spawner, powerups, bullets, mines })，在胜负判定之前调用
 //   verdict () => 收场值 | null，返回非 null 即结束本局
 // 注：开场倒计时/击杀慢动作/战绩统计是表现层（main.js），不复刻。倒计时在
 //     main 里 return 得早、关卡计时不在其内推进，跳过它不改变任何判定。
@@ -135,9 +157,21 @@ function simulate({ maze, actors, types, erode, timeout, onFrame, verdict }) {
   };
 
   const dt = 1 / 60;
-  // 行为质量指标（阶段 22）：每回合累计位移与卡住脱困触发次数
-  const trace = actors.map((p) => ({ dist: 0, stuck: 0, lastX: p.tank.x, lastY: p.tank.y, prevUnstick: 0 }));
-  const traced = () => actors.map((p, i) => ({ side: p.side, ...trace[i] }));
+  // 行为质量指标（阶段 22）：每回合累计位移与卡住脱困触发次数。
+  // 按 actor 取（Map）而不是按开局下标——波次模式中途往 actors 里加车、
+  // 打死了又出列，定长数组的下标会错位到别人头上。Map 的插入序 = actors 序，
+  // 所以 traced() 的输出顺序与改造前一致（且出列的车也留着，统计不丢）。
+  const trace = new Map();
+  const traceOf = (p) => {
+    let tr = trace.get(p);
+    if (!tr) {
+      tr = { side: p.side, dist: 0, stuck: 0, lastX: p.tank.x, lastY: p.tank.y, prevUnstick: 0 };
+      trace.set(p, tr);
+    }
+    return tr;
+  };
+  for (const p of actors) traceOf(p); // 开局参与者先落座（零帧收场也有条目）
+  const traced = () => [...trace.values()].map((tr) => ({ ...tr }));
   for (let t = 0; t < timeout; t += dt) {
     // 1) 全员控制指令（同一帧世界快照）
     const world = { maze, players: actors, bullets, powerups, mines };
@@ -165,11 +199,11 @@ function simulate({ maze, actors, types, erode, timeout, onFrame, verdict }) {
     }
 
     // 行为采样（分离修正之后，位移才是净值）
-    for (let i = 0; i < actors.length; i++) {
-      const tr = trace[i], tk = actors[i].tank;
+    for (const p of actors) {
+      const tr = traceOf(p), tk = p.tank;
       tr.dist += Math.hypot(tk.x - tr.lastX, tk.y - tr.lastY);
       tr.lastX = tk.x; tr.lastY = tk.y;
-      const u = actors[i].ctrl.unstickTimer ?? 0;
+      const u = p.ctrl.unstickTimer ?? 0;
       if (u > 0 && tr.prevUnstick <= 0) tr.stuck++;
       tr.prevUnstick = u;
     }
@@ -237,8 +271,11 @@ function simulate({ maze, actors, types, erode, timeout, onFrame, verdict }) {
     bullets = bullets.filter((b) => !b.dead);
     for (const pw of powerups) pw.update(dt);
 
-    // 6.5) 帧钩子：关卡计时在胜负判定之前推进（同 main 的第 7 段）
-    if (onFrame) onFrame(dt);
+    // 6.5) 帧钩子：关卡计时 / 波次调度在胜负判定之前推进（同 main 的第 7 段）。
+    //      带上本帧的实体容器——波次要往里塞补给道具、往 actors 里补敌人。
+    //      注意 powerups/bullets/mines 在本函数里会被 filter 重新赋值，所以每帧
+    //      现取现给；actors 是入参（同一个数组），调用方必须原地增删不能重新赋值。
+    if (onFrame) onFrame(dt, { spawner, powerups, bullets, mines });
 
     // 7) 胜负
     const out = verdict();
@@ -326,6 +363,123 @@ function playLevel(level) {
   });
 }
 
+// —— 无尽波次生存跑分（--waves）——
+// 波次换图的风格：默认随机（同实机 pickStyle("wave")），--style 显式指定则锁定
+function waveStyle() {
+  if (opt.style && opt.style !== "all") return String(opt.style);
+  const pool = STYLE_POOL_BY_MODE.wave;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+// 跑一次波次生存，与 main 的波次调度同构（曲线全在 waves.js，两边共用纯函数）。
+// 章节换图的处理方式：**一章一次 simulate**。simulate 的 maze 是入参不可中途换，
+// 所以换图 = verdict 返回 "remap" 收场 → 建新图 → 带着同一个坦克对象重新进
+// simulate（对齐 main.remapWaveArena「保留玩家坦克，武器槽与护盾不被换图没收」）。
+// 不另写一份结算副本——结算顺序只有 simulate 这一处。
+// 返回 { wave, kills, outcome, elapsed, stuck, mix, cause }。
+function playWaves() {
+  let waveNo = 0, kills = 0, quotaLeft = 0, gapTimer = 0, elapsed = 0, stuck = 0;
+  let inGap = false;      // 本波已清空，正在喘息（与 gapTimer 分开：gap 可为 0）
+  let pendingEnter = STARTWAVE; // 待进入的波号（首波 / 换图后第一波）——onFrame 里消费
+  let remapTo = null;     // 非 null = 本次 simulate 该收场换图，换完进这一波
+  let capped = false;     // 撞 MAXWAVE 封顶
+  const mix = { easy: 0, normal: 0, hard: 0 }; // 实际投放的档位分布（验证 mix 曲线）
+  const cause = [];       // 玩家死因（子弹/激光/地雷）
+
+  let tier = waveSpec(STARTWAVE).tier;
+  let dims = MAZE_TIERS[tier];
+  let maze = generateMaze(dims.cols, dims.rows, waveStyle());
+  const hero = mkActor("P", corners(dims.cols, dims.rows).tl);
+  hero.ctrl = new AiA(hero, PROXY);
+  const actors = [hero];  // 全程同一个数组：onFrame 原地增删，simulate 看得见
+
+  // 进入第 n 波：置配额 + 开波强制补给（同 main.beginWave，换图那半边在驱动循环里）
+  const enterWave = (n, ctx) => {
+    waveNo = n;
+    quotaLeft = waveSpec(n).quota;
+    inGap = false;
+    gapTimer = 0;
+    const tanks = actors.filter((a) => a.alive).map((a) => a.tank);
+    for (let i = 0; i < waveSpec(n).supply; i++) ctx.spawner.forceSpawn(maze, ctx.powerups, tanks);
+  };
+
+  const onFrame = (dt, ctx) => {
+    elapsed += dt;
+    if (pendingEnter) { enterWave(pendingEnter, ctx); pendingEnter = null; }
+    if (!hero.alive) return; // 收场交给 verdict，别再调度
+
+    // 死敌当帧出列（同 main 段 6.5）：enemiesAlive 才是精确值，颜色/编号也回收
+    for (let i = actors.length - 1; i >= 1; i--) {
+      if (!actors[i].alive) { actors.splice(i, 1); kills++; }
+    }
+
+    const enemiesAlive = actors.length - 1;
+    if (inGap) {
+      gapTimer -= dt;
+      if (gapTimer <= 0) {
+        inGap = false;
+        const next = waveNo + 1;
+        if (next > MAXWAVE) capped = true;
+        else if (shouldRemap(next)) remapTo = next; // 收场换图，新图上再 enterWave
+        else enterWave(next, ctx);
+      }
+      return;
+    }
+    if (quotaLeft <= 0 && enemiesAlive === 0) { inGap = true; gapTimer = WAVE_GAP; return; }
+
+    // 场上不满同屏上限且配额有余 → 补一辆（一帧只补一辆，同 main）
+    const spec = waveSpec(waveNo);
+    if (enemiesAlive >= spec.concurrent || quotaLeft <= 0) return;
+    const spot = pickSpawnSpot(maze, hero.tank, actors.filter((a) => a.alive).map((a) => a.tank));
+    if (!spot) return; // 图太挤：下帧再试
+    const level = pickEnemyLevel(spec.mix);
+    const foe = mkActor("E", {
+      x: spot.x, y: spot.y,
+      a: Math.atan2(hero.tank.y - spot.y, hero.tank.x - spot.x), // 出生朝玩家
+    });
+    foe.ctrl = new AiB(foe, level);
+    actors.push(foe);
+    quotaLeft--;
+    mix[level]++;
+  };
+
+  const verdict = () => {
+    if (!hero.alive) return "dead";
+    if (capped) return "cap";
+    if (remapTo !== null) return "remap";
+    return null;
+  };
+
+  // 一章一次 simulate：收场值为 "remap" 就换图续跑，其余（死/封顶/超时）收工
+  for (;;) {
+    const res = simulate({
+      maze, actors, types: TYPES, erode: ERODE,
+      // 一章 5 波、后期同屏 3 辆，90s 远不够——按章给预算（撞上就记超时）
+      timeout: WAVE.remapEvery * CHAPTER_SECS,
+      onFrame, verdict,
+    });
+    for (const tr of res.trace || []) if (tr.side === "P") stuck += tr.stuck;
+    for (const c of res.cause) if (c.side === "P") cause.push(c.cause);
+    if (res.outcome !== "remap") {
+      const outcome = res.timeout ? "timeout" : res.outcome;
+      return { wave: waveNo, kills, outcome, elapsed, stuck, mix, cause };
+    }
+
+    // 章节换图（同 main.remapWaveArena）：新图 + 玩家挪回 tl + 清场，
+    // 但保留玩家坦克本体（武器槽/护盾是上一章打出来的战果）。
+    // AI 替身的控制器重建：它缓存的路径路点是旧图的格心，换图后是陈旧数据。
+    tier = waveSpec(remapTo).tier;
+    dims = MAZE_TIERS[tier];
+    maze = generateMaze(dims.cols, dims.rows, waveStyle());
+    const tl = corners(dims.cols, dims.rows).tl;
+    hero.tank.x = tl.x; hero.tank.y = tl.y; hero.tank.angle = tl.a;
+    hero.ctrl = new AiA(hero, PROXY);
+    actors.length = 1;      // 换图在空场边界发生，本就该只剩玩家
+    pendingEnter = remapTo;
+    remapTo = null;
+  }
+}
+
 // —— 挑战关卡跑分（--challenge）：AI 替身代打，出各关通关率曲线 ——
 if (CHALLENGE) {
   const pick = CHALLENGE === true ? LEVELS : LEVELS.filter((l) => l.id === Number(CHALLENGE));
@@ -358,6 +512,60 @@ if (CHALLENGE) {
   console.log("注：替身与人类的偏差是双向的——纯激光关虚高（帧级瞄准 + hitscan 等于");
   console.log("    完美狙击手），多敌关偏低（只锁 world.players 里第一个活敌，被第二");
   console.log("    辆车背刺）。绝对值不等于人类难度，只看关与关之间的相对趋势。");
+  process.exit(0);
+}
+
+// —— 波次生存跑分（--waves）：AI 替身代打 TRIES 次，出「活到第几波」分布 ——
+if (WAVES) {
+  console.log(`\n波次跑分：玩家位 = ${PROXY} 档 AI 替身(${opt.aiA ?? "当前版"})，${TRIES} 次，`
+    + `第 ${STARTWAVE} 波起跑，封顶第 ${MAXWAVE} 波`);
+  console.log(`道具池: ${TYPES.length ? TYPES.join(",") : "无"}　地形破坏: ${ERODE ? "开" : "关"}`
+    + `　风格: ${opt.style && opt.style !== "all" ? opt.style : "随机(同实机)"}`);
+
+  const runs = [];
+  const tally = { dead: 0, cap: 0, timeout: 0 };
+  const mixAll = { easy: 0, normal: 0, hard: 0 };
+  const causeAll = { bullet: 0, laser: 0, mine: 0 };
+  for (let i = 0; i < TRIES; i++) {
+    const res = playWaves();
+    runs.push(res);
+    tally[res.outcome] = (tally[res.outcome] ?? 0) + 1;
+    for (const k of Object.keys(mixAll)) mixAll[k] += res.mix[k];
+    for (const c of res.cause) causeAll[c]++;
+    process.stderr.write(`.. ${i + 1}/${TRIES} 第 ${res.wave} 波(${res.outcome}) 杀 ${res.kills} / ${res.elapsed.toFixed(0)}s\n`);
+  }
+
+  const waves = runs.map((r) => r.wave).sort((a, b) => a - b);
+  const sum = (a) => a.reduce((s, v) => s + v, 0);
+  const q = (p) => waves[Math.min(waves.length - 1, Math.floor(p * waves.length))];
+  console.log(
+    `\n到达波次：中位 ${q(0.5)}　平均 ${(sum(waves) / waves.length).toFixed(1)}`
+    + `　最低 ${waves[0]}　最高 ${waves[waves.length - 1]}　四分位 ${q(0.25)}/${q(0.75)}`
+  );
+  console.log(`清波数（到达 − 起跑）：平均 ${(sum(waves.map((w) => w - STARTWAVE)) / waves.length).toFixed(1)}`
+    + `　—— 起跑波固定时这个数才是单波致死率的直接读数`);
+  console.log(`收场：玩家死 ${tally.dead} / 封顶 ${tally.cap} / 超时 ${tally.timeout}`);
+  console.log(`击杀：平均 ${(sum(runs.map((r) => r.kills)) / TRIES).toFixed(1)}`
+    + `　存活时长：平均 ${(sum(runs.map((r) => r.elapsed)) / TRIES).toFixed(0)}s`
+    + `　卡住脱困：合计 ${sum(runs.map((r) => r.stuck))} 次`);
+
+  // 到达波次直方图（每一波一行，看曲线在哪一段开始劝退）
+  const hist = new Map();
+  for (const w of waves) hist.set(w, (hist.get(w) ?? 0) + 1);
+  const top = Math.max(...hist.values());
+  for (const w of [...hist.keys()].sort((a, b) => a - b)) {
+    const n = hist.get(w);
+    console.log(`  第 ${String(w).padStart(2)} 波 ${"█".repeat(Math.round((n / top) * 24))} ${n}`);
+  }
+
+  const mixTotal = sum(Object.values(mixAll)) || 1;
+  console.log(`投放档位：easy ${(mixAll.easy / mixTotal * 100).toFixed(0)}%`
+    + ` / normal ${(mixAll.normal / mixTotal * 100).toFixed(0)}%`
+    + ` / hard ${(mixAll.hard / mixTotal * 100).toFixed(0)}%（共 ${mixTotal} 辆）`);
+  console.log(`玩家死于：子弹 ${causeAll.bullet} / 激光 ${causeAll.laser} / 地雷 ${causeAll.mine}`);
+  console.log("注：替身不是人类——帧级瞄准偏强、只锁 world.players 里第一个活敌偏弱");
+  console.log("    （波次里同屏最多 3 辆，被另外两辆背刺的概率比关卡更高）。绝对波次不");
+  console.log("    等于人类水平，改 WAVE 数值后重跑同参数看相对位移。");
   process.exit(0);
 }
 

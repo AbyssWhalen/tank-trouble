@@ -26,11 +26,14 @@ export const MAZE_TIERS = {
 
 // 对战模式 → 可抽取的地图档位池。每回合 setupRound 从对应池随机抽一档。
 //   pvp(1v1) / pve(人机)：small / medium 二选一，回合间换图增加变化
+//   wave(波次生存)：不随机抽——由 waveSpec(n).tier 确定性给（前两章 medium、
+//     第 11 波起 large），池子只用于 smoke 断言「产出的档位在册」
 //   3p / 4p：归入联机 v2，档位已就绪（medium+large / large），本地版暂不可达
-// 注意：3p/4p 模式尚未实现，large 目前游戏内抽不到，仅由冒烟测试覆盖其缩放正确性。
+// 注意：3p/4p 模式尚未实现；large 曾长期抽不到，阶段 24 起由高波次消费。
 export const TIER_POOL_BY_MODE = {
   pvp: ["small", "medium"],
   pve: ["small", "medium"],
+  wave: ["medium", "large"],
   "3p": ["medium", "large"],
   "4p": ["large"],
 };
@@ -52,6 +55,7 @@ export const MAZE_STYLES = {
 export const STYLE_POOL_BY_MODE = {
   pvp: ["sparse", "symmetric", "rooms"],
   pve: ["sparse", "symmetric", "rooms"],
+  wave: ["sparse", "symmetric", "rooms"], // 档位定死、风格随机——每章换图有花样
   "3p": ["sparse"], // v2 预留保守，先只用经典风格
   "4p": ["sparse"],
 };
@@ -123,6 +127,27 @@ export const ROUND_RESTART_DELAY = 1.5;
 // 局胜制：先到这个胜场数赢得整场（MATCH_OVER 大结算，可再来一场或回菜单）。
 // 同归于尽不加分，所以整场时长有自然上限但无固定局数。
 export const MATCH_TARGET = 5;
+
+// 无尽波次生存（阶段 24）：曲线参数全集中在此，改数值不必翻 waves.js。
+// 语义见 waves.js 的 waveSpec——那边只做算术，这边只放旋钮。
+export const WAVE = {
+  gap: 1.5,             // 波与波之间的空场喘息（秒）：**不冻结**——玩家保有控制权，
+                        //   可趁空场捡补给、挪到有利位置（只有章节换图才 3-2-1 冻结）
+  concurrentCap: 3,     // 同屏敌人硬上限（PLAYER_COLORS 只有 4 色，第 4 辆撞玩家色）
+  concurrentEvery: 5,   // 每这么多波，同屏上限 +1（1→2→3 后到顶）。刻意与 remapEvery
+                        //   同值：每换一张图恰好加一辆，压力台阶与地形换新对齐，
+                        //   一章一个主题（第 1 章单挑 / 第 2 章两辆 / 第 3 章起三辆围攻）
+  quotaCap: 12,         // 单波敌人总数上限（再多一波要打太久）
+  quotaSlope: 0.7,      // 配额斜率：quota = 1 + floor(n × slope)，到 cap 为止
+  easyFade: 5,          // easy 权重从 1 线性归零所用波数
+  hardFrom: 4,          // 第几波开始掺 hard
+  hardRamp: 8,          // hard 权重从 0 爬到 hardCap 所用波数
+  hardCap: 0.8,         // hard 权重上限——留 0.2 给 normal，避免后期清一色
+  remapEvery: 5,        // 每这么多波换一张新图（章节分隔；破洞/雷阵在章内累积）
+  largeFrom: 11,        // 第几波起升 large 档（必须落在换图边界上，否则换不了图）
+  supplyBonusEvery: 3,  // 每这么多波，开波强制补给给 2 个而不是 1 个
+  spawnSafeCells: 2.2,  // 新敌人刷点与玩家的最小格距（不许贴脸空降）
+};
 
 // 回合开场倒计时（3-2-1-GO）：倒计时期间双方全冻结——包括跳过 AI 的
 // getControls（否则 AI 开火冷却在玩家不能动时被烧掉，GO 瞬间枪已就绪=抢先手）。

@@ -181,11 +181,22 @@ export class PowerupSpawner {
     if (this.timer > 0) return;
     this.timer = randRange(POWERUP.spawnInterval); // 重置下一次刷新计时
 
+    this.forceSpawn(maze, powerups, tanks);
+  }
+
+  // 立刻刷一个，绕开计时器（波次生存的开波补给用）。仍守 maxOnField 与避位规则——
+  // 补给是"多给一次机会"，不是"无视场上限流"。不重置 timer：常规刷新节奏与补给互不干扰。
+  // 返回是否真刷出来了（场上满/图太挤时为 false，调用方不必处理，下波再补）。
+  forceSpawn(maze, powerups, tanks) {
+    if (this.types.length === 0) return false;
+    if (powerups.length >= POWERUP.maxOnField) return false;
+
     const spot = this.pickSpot(maze, powerups, tanks);
-    if (!spot) return; // 没找到合适位置，这次跳过（下一拍再试）
+    if (!spot) return false; // 没找到合适位置
 
     const type = this.types[Math.floor(Math.random() * this.types.length)];
     powerups.push(new Powerup(spot.x, spot.y, type));
+    return true;
   }
 
   // 随机选一个刷新点：随机格中心 → 推出墙体 → 校验不与现有道具/坦克太近。

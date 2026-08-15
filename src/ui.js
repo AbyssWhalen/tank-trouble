@@ -15,11 +15,12 @@ import { LEVELS } from "./levels.js";
 // —— 菜单按钮（逻辑坐标，不随迷宫平移）——
 const BTN_W = 300, BTN_H = 66;
 const BTN_X = (CANVAS.width - BTN_W) / 2;
-// 三模式按钮（阶段 23 挑战模式加入后按 84px 间距重排）
+// 四模式按钮（84px 间距；末行 y=592 与 y=664 的 ⚙/? 圆钮不撞）
 const buttons = [
   { label: "双人对战", sub: "P1 vs P2", mode: "pvp", enabled: true, x: BTN_X, y: 340, w: BTN_W, h: BTN_H },
   { label: "人机对战", sub: "P1 vs AI", mode: "pve", enabled: true, x: BTN_X, y: 424, w: BTN_W, h: BTN_H },
   { label: "挑战模式", sub: "单人闯关", mode: "challenge", enabled: true, x: BTN_X, y: 508, w: BTN_W, h: BTN_H },
+  { label: "波次生存", sub: "单人无尽", mode: "wave", enabled: true, x: BTN_X, y: 592, w: BTN_W, h: BTN_H },
 ];
 
 // —— 设置浮层面板（阶段 19：难度/道具/地形/音效 chip 与键位入口全收于此）——
@@ -273,6 +274,22 @@ function levelOverButtons(win, hasNext) {
   const x0 = (CANVAS.width - totalW) / 2;
   return btns.map((b, i) => ({ ...b, x: x0 + i * (W + GAP), y: 460, w: W, h: H }));
 }
+
+// 波次结算横幅点击：返回 "retry" | "menu" | null
+export function waveOverAction(mx, my) {
+  for (const b of waveOverButtons) {
+    if (hitRect(mx, my, b)) return b.action;
+  }
+  return null;
+}
+
+// 波次结算按钮布局（固定两钮，渲染与命中共用）
+const waveOverButtons = (() => {
+  const btns = [{ label: "再来一次", action: "retry" }, { label: "返回菜单", action: "menu" }];
+  const W = 200, H = 52, GAP = 20;
+  const x0 = (CANVAS.width - (btns.length * W + (btns.length - 1) * GAP)) / 2;
+  return btns.map((b, i) => ({ ...b, x: x0 + i * (W + GAP), y: 470, w: W, h: H }));
+})();
 
 // 键位设置面板点击（面板打开时 main 只走这里）：
 //   {type:"bind", player, action} 点了某个键位 chip，进入捕获态
@@ -778,15 +795,16 @@ export function renderPauseOverlay(ctx, mouse) {
 }
 
 // 顶部计分/状态条（固定，不随迷宫平移）。
-// view = { players, matchScores, isPlaying }：isPlaying 时底部提示 Esc 退出。
-export function renderHud(ctx, { players, matchScores, isPlaying, challenge }) {
+// view = { players, matchScores, isPlaying, challenge, wave }：isPlaying 时底部提示 Esc 退出。
+// challenge/wave 二者互斥（模式决定），非空即走单人聚合布局。
+export function renderHud(ctx, { players, matchScores, isPlaying, challenge, wave }) {
   ctx.textBaseline = "middle";
   ctx.font = "bold 18px system-ui, 'Microsoft YaHei', sans-serif";
   const y = 22;
 
-  // 关卡模式：左侧玩家条照旧（含徽章），右侧改聚合显示——多敌人时
-  // 逐一排计分条会重叠且无意义（关卡没有累计比分）
-  if (challenge) {
+  // 单人模式（挑战/波次）：左侧玩家条照旧（含徽章），右侧改聚合显示——
+  // 多敌人时逐一排计分条会重叠且无意义（单人模式没有累计比分）
+  if (challenge || wave) {
     const p = players[0];
     ctx.textAlign = "left";
     ctx.fillStyle = p.color;
@@ -802,8 +820,17 @@ export function renderHud(ctx, { players, matchScores, isPlaying, challenge }) {
 
     ctx.textAlign = "right";
     ctx.fillStyle = THEME.textMain;
-    const timerStr = challenge.timer !== null ? `　⏱ ${Math.ceil(challenge.timer)}s` : "";
-    ctx.fillText(`第 ${challenge.levelId} 关　敌 ×${challenge.enemiesAlive}${timerStr}`, CANVAS.width - 20, y);
+    let rightText;
+    if (challenge) {
+      const timerStr = challenge.timer !== null ? `　⏱ ${Math.ceil(challenge.timer)}s` : "";
+      rightText = `第 ${challenge.levelId} 关　敌 ×${challenge.enemiesAlive}${timerStr}`;
+    } else {
+      // 波次：场上敌 ×M（+N 为本波还没登场的），空场喘息时改播下一波读秒
+      rightText = wave.gap > 0
+        ? `第 ${wave.wave} 波 清空　下一波 ${wave.gap.toFixed(1)}s　击杀 ${wave.kills}`
+        : `第 ${wave.wave} 波　敌 ×${wave.enemiesAlive}${wave.left > 0 ? `+${wave.left}` : ""}　击杀 ${wave.kills}`;
+    }
+    ctx.fillText(rightText, CANVAS.width - 20, y);
     ctx.textAlign = "left";
 
     if (isPlaying) {
@@ -1104,4 +1131,54 @@ export function renderLevelOverBanner(ctx, view) {
   ctx.fillStyle = THEME.textDim;
   ctx.font = "15px system-ui, 'Microsoft YaHei', sans-serif";
   ctx.fillText("R  重试          Esc  返回选关", cx, 560);
+}
+
+// 波次生存结算横幅。view = { wave, kills, best, newRecord, mouse }
+// 没有胜负——只有「活到第几波」，所以标题用中性色，破纪录才上金色。
+export function renderWaveOverBanner(ctx, view) {
+  const { wave, kills, best, newRecord, mouse } = view;
+  const { x: mx, y: my } = mouse;
+  const cx = CANVAS.width / 2;
+
+  ctx.fillStyle = THEME.overlay;
+  ctx.fillRect(0, 0, CANVAS.width, CANVAS.height);
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = newRecord ? "#d99e00" : THEME.textMain;
+  ctx.font = "bold 56px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText(`活到第 ${wave} 波`, cx, 240);
+
+  ctx.fillStyle = THEME.textMain;
+  ctx.font = "22px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText(`击杀 ${kills}`, cx, 306);
+
+  ctx.font = "18px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillStyle = newRecord ? "#d99e00" : THEME.textDim;
+  ctx.fillText(
+    newRecord
+      ? "🏆 新纪录！"
+      : best.wave > 0
+        ? `历史最高：第 ${best.wave} 波 · 击杀 ${best.kills}`
+        : "首战告负，再来一把",
+    cx, 366
+  );
+
+  for (const b of waveOverButtons) {
+    const hover = hitRect(mx, my, b);
+    ctx.fillStyle = hover ? THEME.accent : "#ffffff";
+    roundRect(ctx, b.x, b.y, b.w, b.h, 10);
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = hover ? THEME.accentLight : THEME.btnBorder;
+    roundRect(ctx, b.x, b.y, b.w, b.h, 10);
+    ctx.stroke();
+    ctx.fillStyle = hover ? "#ffffff" : THEME.textMain;
+    ctx.font = "bold 19px system-ui, 'Microsoft YaHei', sans-serif";
+    ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2);
+  }
+
+  ctx.fillStyle = THEME.textDim;
+  ctx.font = "15px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText("R  再来一次          Esc  返回菜单", cx, 570);
 }
