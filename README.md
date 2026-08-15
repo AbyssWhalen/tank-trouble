@@ -103,6 +103,7 @@ tank-trouble/
 │   ├── main.js       # 主循环 + 状态机 | Main loop & state machine
 │   ├── ui.js         # 菜单/HUD/浮层 | Menus, HUD & overlays
 │   ├── ai.js         # AI 控制器 | AI controller
+│   ├── levels.js     # 挑战关卡表 | Challenge campaign levels
 │   ├── maze.js       # 迷宫生成 | Maze generation
 │   ├── tank.js       # 坦克物理 | Tank physics
 │   ├── bullet.js     # 子弹 + 反弹 | Bullet & ricochet
@@ -110,10 +111,11 @@ tank-trouble/
 │   ├── powerup.js    # 道具刷新 | Power-up spawning
 │   ├── mine.js       # 地雷 | Mines
 │   ├── audio.js      # 程序合成音效 | Procedural SFX (Web Audio)
+│   ├── stats.js      # 战绩统计 | Match stats persistence
 │   ├── settings.js   # 设置持久化 | Settings persistence
 │   ├── collision.js  # 碰撞检测 | Collision detection
 │   └── effects.js    # 视觉特效 | Visual effects
-├── scripts/          # 冒烟测试 + AI 对打 | Smoke tests & AI arena (npm run smoke / arena)
+├── scripts/          # 冒烟测试 + AI 对打/关卡跑分 | Smoke tests, AI arena & level scorer (npm run smoke / arena)
 ├── electron/         # Electron 主进程 | Electron main process
 └── index.html        # 渲染进程入口 | Renderer entry
 ```
