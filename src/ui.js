@@ -11,6 +11,7 @@ import {
 } from "./config.js";
 import { drawPowerupIcon } from "./powerup.js";
 import { LEVELS } from "./levels.js";
+import { UPGRADES } from "./upgrades.js";
 
 // —— 菜单按钮（逻辑坐标，不随迷宫平移）——
 const BTN_W = 300, BTN_H = 66;
@@ -833,6 +834,10 @@ export function renderHud(ctx, { players, matchScores, isPlaying, challenge, wav
     ctx.fillText(rightText, CANVAS.width - 20, y);
     ctx.textAlign = "left";
 
+    // 波次模式左下角「已获强化」条（抽卡拿了什么，一眼可查——卡是永久的，
+    // 一局能攒十几张，光靠记不住）
+    if (wave?.taken) renderUpgradeBar(ctx, wave.taken);
+
     if (isPlaying) {
       ctx.fillStyle = THEME.textDim;
       ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
@@ -1182,3 +1187,148 @@ export function renderWaveOverBanner(ctx, view) {
   ctx.font = "15px system-ui, 'Microsoft YaHei', sans-serif";
   ctx.fillText("R  再来一次          Esc  返回菜单", cx, 570);
 }
+
+// ============================================================
+// 波间强化抽卡浮层（阶段 25）——照 LEVEL_PANEL 四件套：常量 / 命中 / 绘制。
+// 与其他浮层的两点不同，都是刻意的：
+// 1. **卡片命中表是按张数现算的，不是模块级静态表**（levelCards 那种）。
+//    可选卡不足 3 张时（卡池抽空 / 道具全关）浮层只出 1~2 张，静态表会把
+//    剩下的卡画在偏左的位置。现算一行居中，1 张也居中。
+// 2. 它没有「关闭」这条出路——抽卡是必经的一步（main 那边 Esc 也被吞掉）。
+//    所以不做面板外点击关闭，也不画「Esc 关闭」提示。
+// ============================================================
+
+const DRAFT_PANEL = { w: 760, h: 380 };
+DRAFT_PANEL.x = (CANVAS.width - DRAFT_PANEL.w) / 2;
+DRAFT_PANEL.y = (CANVAS.height - DRAFT_PANEL.h) / 2;
+// 卡高按内容排（角标 24 / 卡名 76 / 描述 112 / 层数 h-26=146）——留 208 的话
+// 描述与层数之间会空出 70px 的洞，看着像有东西没画出来
+const DRAFT_CARD = { w: 210, h: 172, gap: 22 };
+
+// count 张卡片居中排一行，返回命中矩形数组（纯函数，绘制与命中共用同一份坐标）
+function draftCards(count) {
+  const n = Math.max(0, count | 0);
+  const rowW = n * DRAFT_CARD.w + (n - 1) * DRAFT_CARD.gap;
+  const x0 = (CANVAS.width - rowW) / 2;
+  return Array.from({ length: n }, (_, i) => ({
+    index: i,
+    x: x0 + i * (DRAFT_CARD.w + DRAFT_CARD.gap),
+    y: DRAFT_PANEL.y + 116,
+    w: DRAFT_CARD.w,
+    h: DRAFT_CARD.h,
+  }));
+}
+
+// 命中检测：光标在第几张卡上。与 levelSelectAction 同构（返回 action 对象或 null）。
+// main 每帧拿它更新 hover，点击时拿它当选卡——同一个出口，不会「看着高亮点了却没中」。
+export function draftAction(mx, my, count) {
+  for (const c of draftCards(count)) {
+    if (hitRect(mx, my, c)) return { type: "pick", index: c.index };
+  }
+  return null;
+}
+
+// view = { offers: [{id,label,desc,cap}], taken: Map<id,层数>, wave, hover, mouse }
+export function renderDraftOverlay(ctx, view) {
+  const { offers, taken, wave, mouse } = view;
+  const { x: mx, y: my } = mouse;
+  const p = DRAFT_PANEL;
+  const cx = CANVAS.width / 2;
+
+  ctx.fillStyle = THEME.overlay;
+  ctx.fillRect(0, 0, CANVAS.width, CANVAS.height);
+  ctx.fillStyle = THEME.pageBg;
+  roundRect(ctx, p.x, p.y, p.w, p.h, 14);
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = THEME.accent;
+  roundRect(ctx, p.x, p.y, p.w, p.h, 14);
+  ctx.stroke();
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = THEME.title;
+  ctx.font = "bold 28px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText(`第 ${wave} 波 清空`, cx, p.y + 46);
+  ctx.fillStyle = THEME.textDim;
+  ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText("选一张强化，本局永久生效", cx, p.y + 78);
+
+  const cards = draftCards(offers.length);
+  for (const c of cards) {
+    const u = offers[c.index];
+    const layers = taken?.get?.(u.id) ?? 0;
+    const hover = hitRect(mx, my, c) || view.hover === c.index;
+
+    ctx.fillStyle = hover ? THEME.accent : THEME.btnFill;
+    roundRect(ctx, c.x, c.y, c.w, c.h, 10);
+    ctx.fill();
+    ctx.lineWidth = hover ? 2.5 : 1.5;
+    ctx.strokeStyle = hover ? THEME.accentLight : THEME.btnDisabledBorder;
+    roundRect(ctx, c.x, c.y, c.w, c.h, 10);
+    ctx.stroke();
+
+    // 数字键角标（左上小圆）：键盘与鼠标两条路都能选，提示得写在卡上
+    ctx.fillStyle = hover ? "rgba(255,255,255,0.9)" : THEME.btnDisabledBorder;
+    ctx.beginPath();
+    ctx.arc(c.x + 24, c.y + 24, 13, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = hover ? THEME.accent : THEME.textMain;
+    ctx.font = "bold 15px system-ui, sans-serif";
+    ctx.fillText(String(c.index + 1), c.x + 24, c.y + 25);
+
+    ctx.fillStyle = hover ? "#ffffff" : THEME.textMain;
+    ctx.font = "bold 20px system-ui, 'Microsoft YaHei', sans-serif";
+    ctx.fillText(u.label, c.x + c.w / 2, c.y + 76);
+
+    // 效果描述：卡宽内自动压缩（maxWidth），别顶出卡片
+    ctx.fillStyle = hover ? "rgba(255,255,255,0.88)" : THEME.textDim;
+    ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
+    ctx.fillText(u.desc, c.x + c.w / 2, c.y + 112, c.w - 24);
+
+    // 层数：已有几层 / 上限。满层的卡不会被抽出来，所以这里恒 < cap
+    ctx.fillStyle = hover ? "rgba(255,255,255,0.75)" : THEME.textDim;
+    ctx.font = "12px system-ui, 'Microsoft YaHei', sans-serif";
+    ctx.fillText(layers > 0 ? `已有 ${layers} / ${u.cap} 层` : `可叠 ${u.cap} 层`,
+      c.x + c.w / 2, c.y + c.h - 26);
+  }
+
+  ctx.fillStyle = THEME.textDim;
+  ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.fillText(`按 ${cards.map((c) => c.index + 1).join(" / ")} 键或点击卡片选择`,
+    cx, p.y + p.h - 26);
+}
+
+// HUD 左下角「已获强化」条（只在波次模式显示）。taken 是 Map<id, 层数>。
+// 短名取 label 前两字（11 张卡两两不同，已核对：弹仓/转向/履带/跳弹/破障/
+// 散射/激光/雷袋/护盾/补给/战场）——为一行 HUD 在数据层加 short 字段不值。
+export function renderUpgradeBar(ctx, taken) {
+  if (!taken || taken.size === 0) return;
+  const items = [];
+  for (const u of UPGRADES) {
+    const n = taken.get(u.id) ?? 0;
+    if (n > 0) items.push(`${u.label.slice(0, 2)}${n > 1 ? `×${n}` : ""}`);
+  }
+  if (!items.length) return;
+
+  ctx.save();
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.font = "12px system-ui, 'Microsoft YaHei', sans-serif";
+  const y = CANVAS.height - 42;
+  let x = 20;
+  ctx.fillStyle = THEME.textDim;
+  ctx.fillText("强化", x, y);
+  x += 32;
+  for (const label of items) {
+    const w = ctx.measureText(label).width + 14;
+    ctx.fillStyle = "rgba(255,255,255,0.14)";
+    roundRect(ctx, x, y - 10, w, 20, 6);
+    ctx.fill();
+    ctx.fillStyle = THEME.textMain;
+    ctx.fillText(label, x + 7, y);
+    x += w + 6;
+  }
+  ctx.restore();
+}
+

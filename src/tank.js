@@ -9,6 +9,7 @@ import { TANK, BULLET, POWERUP, THEME } from "./config.js";
 import { resolveCircleWalls, segmentVsSegmentParam } from "./collision.js";
 import { Bullet } from "./bullet.js";
 import { Mine } from "./mine.js";
+import { neutralMods } from "./upgrades.js";
 
 export class Tank {
   // x, y: 车体中心世界坐标（像素）
@@ -32,6 +33,11 @@ export class Tank {
     this.mineHoldTimer = 0;  // 持雷超时计时（秒）：归零清空存货，部署/拾取时刷新
     this.shield = false;     // 是否持有护盾（挡一次致命伤害）
     this.shieldTimer = 0;    // 护盾剩余时间（秒），到点自动消失防一直龟
+
+    // —— 实例数值倍率（阶段 25 波次生存的强化/词条挂点）——
+    // 中性初值 = 原常量行为，所以 pvp/pve/challenge 三个模式一个字不用改。
+    // 只有 wave 模式会往这里写（玩家侧 upgrades.applyUpgrade、敌人侧 waves.applyElite）。
+    this.mods = neutralMods();
   }
 
   // dt: 距上一帧的秒数；walls: 墙线段数组，用于撞墙不穿
@@ -61,12 +67,12 @@ export class Tank {
       }
     }
 
-    // 转向：原地转
-    this.angle += controls.turn * TANK.turnSpeed * dt;
+    // 转向：原地转（mods.turn 中性 1）
+    this.angle += controls.turn * TANK.turnSpeed * (this.mods?.turn ?? 1) * dt;
 
-    // 前进/后退：沿朝向移动
+    // 前进/后退：沿朝向移动（mods.speed 中性 1）
     if (controls.move !== 0) {
-      const dist = controls.move * TANK.moveSpeed * dt;
+      const dist = controls.move * TANK.moveSpeed * (this.mods?.speed ?? 1) * dt;
       this.x += Math.cos(this.angle) * dist;
       this.y += Math.sin(this.angle) * dist;
     }
@@ -104,7 +110,7 @@ export class Tank {
       for (const b of bullets) {
         if (b.owner === this && !b.dead) mine++;
       }
-      if (mine >= BULLET.maxAlive) return NO_FIRE;
+      if (mine >= BULLET.maxAlive + (this.mods?.maxAlive ?? 0)) return NO_FIRE;
     }
 
     this.cooldown = BULLET.cooldown;
@@ -196,6 +202,7 @@ export class Tank {
     const vy = Math.sin(heading) * BULLET.speed;
     const b = new Bullet(bx, by, vx, vy, this);
     b.kind = kind;
+    b.erodePower = 1 + (this.mods?.erode ?? 0); // 破障弹头：每次反弹多削几点墙
     return b;
   }
 
@@ -203,23 +210,26 @@ export class Tank {
   // 武器改装槽（scatter/laser/mine）互斥：拾取异类先清空旧存货再赋新，
   // 同类拾取叠加次数；shield 独立并存（刷新一层 + 重置计时）。
   // 互斥让 tryFire 的分支优先级永远无歧义，玩家/AI 心智模型也简单。
+  // mods.*Bonus 是波次生存的「扩容」强化（中性 0）：只加**拾取时的给予量**，
+  // 不改互斥规则，也不给凭空的存货——必须真的捡到那件道具才生效。
   applyPowerup(type) {
+    const m = this.mods;
     if (type === "scatter") {
       this.laserShots = 0;
       this.mineCharges = 0;
-      this.scatterShots += POWERUP.scatter.shots;
+      this.scatterShots += POWERUP.scatter.shots + (m?.scatterBonus ?? 0);
     } else if (type === "laser") {
       this.scatterShots = 0;
       this.mineCharges = 0;
-      this.laserShots += POWERUP.laser.shots;
+      this.laserShots += POWERUP.laser.shots + (m?.laserBonus ?? 0);
     } else if (type === "mine") {
       this.scatterShots = 0;
       this.laserShots = 0;
-      this.mineCharges += POWERUP.mine.charges;
+      this.mineCharges += POWERUP.mine.charges + (m?.mineBonus ?? 0);
       this.mineHoldTimer = POWERUP.mine.holdTimeout; // 拾取起算持雷超时
     } else if (type === "shield") {
       this.shield = true;
-      this.shieldTimer = POWERUP.shield.duration;
+      this.shieldTimer = POWERUP.shield.duration + (m?.shieldBonus ?? 0);
     }
   }
 

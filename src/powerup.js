@@ -168,14 +168,18 @@ export class PowerupSpawner {
   constructor(types) {
     this.types = types || [];
     this.timer = randRange(POWERUP.spawnInterval); // 开局先等一拍再刷第一个
+    // 场上道具上限。默认 = POWERUP.maxOnField（原行为）；波次生存的「补给增量」
+    // 强化会把它调高——**必须调这里**，不然多刷的补给会被下面两道门静默吃掉，
+    // 那张卡就是一张空卡（场上已有 2 个没捡的道具时 forceSpawn 直接 false）。
+    this.cap = POWERUP.maxOnField;
   }
 
   // 每帧推进。到点且场上未满则刷一个，入 powerups 数组（原地 push）。
   // maze: 当前地图（取 cols/rows/walls 选位）；powerups: 当前场上道具（数量限流）；
   // tanks: 存活坦克数组（避开正踩在上面的位置，防一刷出来就被吃/重叠）。
   update(dt, maze, powerups, tanks) {
-    if (this.types.length === 0) return;          // 道具关闭
-    if (powerups.length >= POWERUP.maxOnField) return; // 场上已满
+    if (this.types.length === 0) return;      // 道具关闭
+    if (powerups.length >= this.cap) return;  // 场上已满
 
     this.timer -= dt;
     if (this.timer > 0) return;
@@ -184,12 +188,12 @@ export class PowerupSpawner {
     this.forceSpawn(maze, powerups, tanks);
   }
 
-  // 立刻刷一个，绕开计时器（波次生存的开波补给用）。仍守 maxOnField 与避位规则——
+  // 立刻刷一个，绕开计时器（波次生存的开波补给用）。仍守 this.cap 与避位规则——
   // 补给是"多给一次机会"，不是"无视场上限流"。不重置 timer：常规刷新节奏与补给互不干扰。
   // 返回是否真刷出来了（场上满/图太挤时为 false，调用方不必处理，下波再补）。
   forceSpawn(maze, powerups, tanks) {
     if (this.types.length === 0) return false;
-    if (powerups.length >= POWERUP.maxOnField) return false;
+    if (powerups.length >= this.cap) return false;
 
     const spot = this.pickSpot(maze, powerups, tanks);
     if (!spot) return false; // 没找到合适位置

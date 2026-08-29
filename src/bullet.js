@@ -22,6 +22,9 @@ export class Bullet {
     this.age = 0;        // 已存活秒数
     this.dead = false;   // true 时 main 会从数组移除
     this.trail = [];     // 最近几帧的位置（拖尾渲染用，反弹处自然拐弯）
+    // 每次反弹削多少点墙耐久。默认 1 = 阶段 18 的原行为；
+    // 波次生存的「破障弹头」强化由 tank.spawnBullet 按 mods.erode 写高。
+    this.erodePower = 1;
   }
 
   // dt: 距上一帧秒数；walls: 墙线段数组；
@@ -59,8 +62,8 @@ export class Bullet {
           const r = reflect(this.vx, this.vy, hit.nx, hit.ny);
           this.vx = r.vx;
           this.vy = r.vy;
-          // 3) 磨墙：内墙被撞掉 1 点耐久（外墙无 hp 字段天然免疫）
-          if (erode && !w.border && w.hp !== undefined) w.hp--;
+          // 3) 磨墙：内墙被撞掉 erodePower 点耐久（外墙无 hp 字段天然免疫）
+          if (erode && !w.border && w.hp !== undefined) w.hp -= this.erodePower;
           // 4) 计反弹次数，超限消亡
           this.bounces++;
           if (this.bounces > BULLET.maxBounces) {
@@ -76,9 +79,12 @@ export class Bullet {
   // 出膛宽限只保护"尚未反弹"的子弹（防止刚出炮口就打死自己）；
   // 一旦撞墙反弹就立刻解除豁免——贴墙开炮弹回来打死自己是原版的
   // 经典自杀手感，不能被宽限期豁免掉。
+  // 唯一的例外是波次生存的「跳弹免疫」强化（owner.mods.selfSafe）：那是玩家
+  // 花一次抽卡换掉这条规则，属于 roguelite 的规则改写，不是默认行为。
   canHit(tank) {
-    if (tank === this.owner && this.bounces === 0 && this.age < BULLET.selfHitGrace) {
-      return false;
+    if (tank === this.owner) {
+      if (tank.mods?.selfSafe) return false;
+      if (this.bounces === 0 && this.age < BULLET.selfHitGrace) return false;
     }
     return true;
   }

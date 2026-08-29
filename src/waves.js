@@ -11,9 +11,12 @@
 //   mix         三档 AI 权重，随波次从 easy 滑向 hard（hardCap 留点 normal 变化）
 // 同屏上限硬顶 3 有个硬理由：PLAYER_COLORS 只有 4 色，敌人占 1..3 号，
 // 第 4 辆会撞玩家自己的青绿。
+//
+// 三层在第 16 波全部到顶（见文件下半部分 eliteSpec 上方的长注释），所以阶段 25
+// 追加了第四层「敌人词条」——同一辆车随波次变强，把封顶推到第 31 波。
 // ============================================================
 
-import { WAVE, TIER_POOL_BY_MODE, CELL_SIZE, TANK } from "./config.js";
+import { WAVE, TIER_POOL_BY_MODE, CELL_SIZE, TANK, ENEMY_TRAIT } from "./config.js";
 import { resolveCircleWalls } from "./collision.js";
 
 // 三档权重的固定枚举顺序（对象字面量插入序即此序，加权抽取才确定）
@@ -112,6 +115,91 @@ export function pickSpawnSpot(maze, hero, occupied, rand = Math.random) {
     return top[Math.min(top.length - 1, Math.floor(clamp(rand(), 0, 1) * top.length))];
   }
   return null;
+}
+
+// ============================================================
+// 敌人词条（阶段 25）——把封顶从第 16 波推到第 31 波
+//
+// 为什么需要它：waveSpec 的四个旋钮在第 16 波全部到顶（quotaCap 12 /
+// concurrentCap 3 / hardCap 0.8 / largeFrom 11），第 16 波与第 26 波的规格
+// 逐字节相同——「无尽」其实是无限重复同一波。而三层里没有一层还能往上加：
+// 同屏受色板限制（4 色）、AI 只有三档。所以增量只能来自「同一辆车更强」。
+//
+// 两条纪律：
+// 1. **只复用已有机制**（护盾 / 武器改装槽 / 坦克物理倍率），ai.js 一行不改。
+//    AI 读的是状态不是事件（self.laserShots / self.mineCharges / 对手 shield），
+//    所以发下去的装备它会自动正确使用——这是「不发明新能力」换来的红利。
+// 2. **不给地雷**。AI 的布雷三时机 + 离玩家最远处刷点意味着雷多半会超时作废，
+//    而没作废的又跨波留在图上（只有换图才清）——第 16 波同屏 3 辆轮换 12 个配额，
+//    一条命模式里满地隐形雷不是难度，是不可读。
+//
+// 档位白名单（两条都是从 ai.js 的实际行为反推的，不是配平口味）：
+// - hard 不给盾：berserkMode 在自己有盾时直接放弃躲弹冲锋，而躲弹正是 hard
+//   最强的资产（dodgeHorizon 1.1 / dodgeMargin 16）。给 hard 发盾等于削它。
+//   作为补偿，不带盾的档提前 5 波拿到武器（weaponFrom 1 而不是 2）。
+// - 只有 hard 给激光：低档持激光是「随机方向的瞬时狙」——只有 hard 的 bounceAim
+//   认全路径反弹解，会等扫中了才开火。对玩家来说前者是随机死亡，后者是可读威胁。
+// ============================================================
+
+// 词条档位：0 无 / 1 第一件 / 2 第二件 / 3 武器加量 / 4 加量翻倍 / 5 hard 换激光。
+// 台阶落在 6/11/16/21/26 波——与 remapEvery 同相位，「换一张图升一档」。
+export function eliteStep(n) {
+  const wave = Math.max(1, Math.floor(n));
+  if (wave < ENEMY_TRAIT.from) return 0;
+  return Math.min(
+    ENEMY_TRAIT.stepCap,
+    1 + Math.floor((wave - ENEMY_TRAIT.from) / ENEMY_TRAIT.every)
+  );
+}
+
+// 连续爬升进度 0..1（creepFrom 波起线性，满于 creepFrom + 1/creepRate 波 = 第 31 波）。
+// **这条是整条难度曲线的承重墙**，不是装备阶梯的补充：实测装备阶梯里只有「hard 换激光」
+// 一级量得出来（第 26 波中位存活 7.3→4.8s），另外三级（盾 / 散射 / 散射加量）全落在
+// 1.2s 的噪声底以内——AI 的出手节奏闸门在 cfg.fireCooldown，弹药与盾都不是它的约束。
+// 而移速/转速是物理量，不经过任何 AI 决策，所以从换大图那章（第 11 波）就起爬，
+// 一路给到第 31 波，把装备阶梯量不出来的那三级波段填上。
+export function eliteCreep(n) {
+  return clamp((Math.max(1, Math.floor(n)) - ENEMY_TRAIT.creepFrom) * ENEMY_TRAIT.creepRate, 0, 1);
+}
+
+// 第 n 波、某 AI 档位的敌人该带什么。纯函数（同 (n,tier) 恒等，无随机）——
+// 确定性是刻意的：玩家能学会「第 26 波起困难敌人开场一发激光」，
+// 而不是每辆车随机开盲盒。哪辆车带什么由头顶图标当场告知（渲染读活体状态）。
+export function eliteSpec(n, tier = "normal") {
+  const step = eliteStep(n);
+  const creep = eliteCreep(n);
+  const shield = step >= 1 && ENEMY_TRAIT.shieldTiers.includes(tier);
+  // 带盾的档第 2 档才拿武器，不带盾的档第 1 档就拿（补偿它永远没有盾）
+  const weaponFrom = ENEMY_TRAIT.shieldTiers.includes(tier) ? 2 : 1;
+  let weapon = step >= weaponFrom ? "scatter" : null;
+  if (step >= ENEMY_TRAIT.stepCap && ENEMY_TRAIT.laserTiers.includes(tier)) weapon = "laser";
+  return {
+    step,
+    shield,
+    weapon,
+    // 散射加量两级：第 3 档 +1 单位、第 4 档起 +2 单位（3→6→9 发）。
+    // 只在真的拿着散射时有意义（换成激光后这层就没了——武器槽互斥）
+    scatterBonus: weapon === "scatter"
+      ? ENEMY_TRAIT.scatterBonus * clamp(step - 2, 0, 2)
+      : 0,
+    speed: 1 + creep * ENEMY_TRAIT.speedCap,
+    turn: 1 + creep * ENEMY_TRAIT.turnCap,
+  };
+}
+
+// 把词条套到一辆刚投放的敌方坦克上。幂等（同 spec 重复调结果相同，只有武器发数会叠）。
+// 顺序有讲究：先写 mods（applyPowerup 要读 scatterBonus），再发武器，最后发盾
+// （盾与武器槽并存，不互斥）。
+export function applyElite(tank, elite) {
+  if (!tank || !elite) return tank;
+  if (tank.mods) {
+    tank.mods.speed = elite.speed;
+    tank.mods.turn = elite.turn;
+    tank.mods.scatterBonus = elite.scatterBonus;
+  }
+  if (elite.weapon) tank.applyPowerup(elite.weapon);
+  if (elite.shield) tank.applyPowerup("shield");
+  return tank;
 }
 
 // 最高记录宽松校验。坏档/空档落 { wave: 0, kills: 0 }（0 波 = 没有记录）。

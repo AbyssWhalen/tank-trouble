@@ -22,6 +22,10 @@
 //   node scripts/arena.mjs --waves --startwave 8          # 空降第 8 波起跑（量单波致死率）
 //   node scripts/arena.mjs --waves --maxwave 40           # 抬高波次封顶（默认 30，防替身活太久）
 //   node scripts/arena.mjs --waves --wavegap 1.5          # 波间喘息（默认 0，见 WAVE_GAP 注释）
+//   node scripts/arena.mjs --waves --draft off            # 关掉波间抽卡（阶段 24 行为，控制组）
+//   node scripts/arena.mjs --waves --draft first          # 抽卡永远拿第 1 张（对卡池均匀采样）
+//   node scripts/arena.mjs --waves --elite off            # 关掉敌人词条（单层隔离实验）
+//   node scripts/arena.mjs --waves --startwave 16 --pregrant 15  # 空降并预发 15 张卡
 // 注意：挂仓库外的 AI 模块副本时，其相对 import 需先改写为绝对 file:// 路径
 // （git show 旧版本后用 sed 替换，见 CLAUDE.md）。
 // ============================================================
@@ -31,16 +35,22 @@ import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { generateMaze, destroyWallsInRadius, destroyWallSegments } from "../src/maze.js";
 import { Tank } from "../src/tank.js";
-import { PowerupSpawner } from "../src/powerup.js";
+import { PowerupSpawner, Powerup } from "../src/powerup.js";
 import { castLaserPath } from "../src/laser.js";
 import {
   circleVsCircle, separateCircles, resolveCircleWalls, closestPointOnSegment,
 } from "../src/collision.js";
 import {
   CELL_SIZE, TANK, BULLET, POWERUP, MAZE_TIERS, TIER_POOL_BY_MODE, STYLE_POOL_BY_MODE, WAVE,
+  UPGRADE,
 } from "../src/config.js";
 import { LEVELS, evaluateObjective } from "../src/levels.js";
-import { waveSpec, pickEnemyLevel, shouldRemap, pickSpawnSpot } from "../src/waves.js";
+import {
+  waveSpec, pickEnemyLevel, shouldRemap, pickSpawnSpot, eliteSpec, applyElite,
+} from "../src/waves.js";
+import {
+  pickOffers, applyUpgrade, fieldCapOf, supplyCountOf, UPGRADES,
+} from "../src/upgrades.js";
 
 // —— 参数解析（--key value 形式，全部可选；后面没跟值的当开关 true）——
 const argv = process.argv.slice(2);
@@ -82,6 +92,25 @@ const STARTWAVE = Math.max(1, Number(opt.startwave ?? 1));
 const WAVE_GAP = Number(opt.wavegap ?? 0);
 const TRIES = Number(opt.tries ?? 30);      // 每关代打次数
 const PROXY = opt.proxy ?? "normal";        // 玩家位 AI 替身的难度档
+
+// —— 阶段 25 的两层成长（只对 --waves 生效）——
+// 两层都必须进跑分，否则跑的是一个不存在的游戏。可分别关掉做单层隔离实验。
+const ELITE = opt.elite !== "off";          // 敌人词条
+// 抽卡策略：off=不抽（阶段 24 行为，控制组）/ first=永远拿第 1 张（对卡池均匀
+// 采样，量「平均一张卡值多少」）/ priority=按下面的静态排序挑最优（量上界）
+const DRAFT = opt.draft ?? "priority";
+// 空降时预发几张卡（默认对齐空降波号）。**这不是可选糖**：敌人词条第 6 波才起、
+// 连续倍率第 11 波才爬，而替身从第 1 波跑中位只到第 2~3 波，根本活不到两层生效
+// 的波段。所以主实验必须空降，而空降的玩家若身上没有本该攒下的卡，测的就是一个
+// 不存在的局面。
+const PREGRANT = Math.max(0, Number(opt.pregrant ?? STARTWAVE - 1));
+// priority 策略的排序表：越前越优先。按「对 AI 替身有用」排的，**不等于对人类有用**——
+// ricochet 排第一是因为替身死于自己跳弹的比例极高（见 WAVE_GAP 注释里的伪影），
+// 人类玩家远没那么频繁自杀；laserUp/mineUp 垫底是因为互搏中激光/地雷死因恒为 0。
+const DRAFT_PRIORITY = [
+  "ricochet", "ammo", "speed", "turn", "shieldUp", "supply",
+  "scatterUp", "salvage", "drill", "laserUp", "mineUp",
+];
 
 // AI 模块可替换（新旧对比的关键）：默认双方都用当前仓库版
 async function loadAi(p) {
@@ -376,7 +405,7 @@ function waveStyle() {
 // 所以换图 = verdict 返回 "remap" 收场 → 建新图 → 带着同一个坦克对象重新进
 // simulate（对齐 main.remapWaveArena「保留玩家坦克，武器槽与护盾不被换图没收」）。
 // 不另写一份结算副本——结算顺序只有 simulate 这一处。
-// 返回 { wave, kills, outcome, elapsed, stuck, mix, cause }。
+// 返回 { wave, kills, outcome, elapsed, stuck, mix, cause, taken }。
 function playWaves() {
   let waveNo = 0, kills = 0, quotaLeft = 0, gapTimer = 0, elapsed = 0, stuck = 0;
   let inGap = false;      // 本波已清空，正在喘息（与 gapTimer 分开：gap 可为 0）
@@ -385,6 +414,9 @@ function playWaves() {
   let capped = false;     // 撞 MAXWAVE 封顶
   const mix = { easy: 0, normal: 0, hard: 0 }; // 实际投放的档位分布（验证 mix 曲线）
   const cause = [];       // 玩家死因（子弹/激光/地雷）
+  const taken = new Map();                    // 本 run 已抽的卡（id → 层数）
+  // 抽卡池的 requires 上下文：与实机同源（玩家启用的道具类型 + 地形开关）
+  const draftCtx = { types: new Set(TYPES), wallBreak: ERODE };
 
   let tier = waveSpec(STARTWAVE).tier;
   let dims = MAZE_TIERS[tier];
@@ -393,14 +425,34 @@ function playWaves() {
   hero.ctrl = new AiA(hero, PROXY);
   const actors = [hero];  // 全程同一个数组：onFrame 原地增删，simulate 看得见
 
+  // 抽一张卡（同 main 的清波抽卡）。返回卡 id，没抽（策略 off / 无可抽卡）返回 null。
+  const draftOnce = () => {
+    if (DRAFT === "off") return null;
+    const offers = pickOffers(taken, draftCtx);
+    if (!offers.length) return null;
+    // first：拿第 1 张（pickOffers 已随机洗过，等价于对可抽池均匀采样）
+    // priority：按静态排序表挑最优（量「会抽卡的玩家」的上界）
+    const card = DRAFT === "priority"
+      ? offers.slice().sort((a, b) => DRAFT_PRIORITY.indexOf(a.id) - DRAFT_PRIORITY.indexOf(b.id))[0]
+      : offers[0];
+    applyUpgrade(hero.tank, card.id, taken);
+    return card.id;
+  };
+  // 空降预发：把本该在第 1..N-1 波攒下的卡先发掉（见 PREGRANT 注释）
+  for (let i = 0; i < PREGRANT; i++) if (!draftOnce()) break;
+
   // 进入第 n 波：置配额 + 开波强制补给（同 main.beginWave，换图那半边在驱动循环里）
   const enterWave = (n, ctx) => {
     waveNo = n;
     quotaLeft = waveSpec(n).quota;
     inGap = false;
     gapTimer = 0;
+    // 场上道具上限跟着 supply 卡走。**必须每波重设**：simulate 一章新建一次
+    // spawner，只在开局设一次的话每次换图都退回默认 cap（那 supply 卡就半张空卡）
+    ctx.spawner.cap = fieldCapOf(hero.tank.mods);
     const tanks = actors.filter((a) => a.alive).map((a) => a.tank);
-    for (let i = 0; i < waveSpec(n).supply; i++) ctx.spawner.forceSpawn(maze, ctx.powerups, tanks);
+    const supply = supplyCountOf(waveSpec(n), hero.tank.mods);
+    for (let i = 0; i < supply; i++) ctx.spawner.forceSpawn(maze, ctx.powerups, tanks);
   };
 
   const onFrame = (dt, ctx) => {
@@ -410,7 +462,20 @@ function playWaves() {
 
     // 死敌当帧出列（同 main 段 6.5）：enemiesAlive 才是精确值，颜色/编号也回收
     for (let i = actors.length - 1; i >= 1; i--) {
-      if (!actors[i].alive) { actors.splice(i, 1); kills++; }
+      if (!actors[i].alive) {
+        // 战场回收：按 mods.salvage 概率在尸体位置掉一个道具（同 main.hitPlayer）。
+        // 绕开 spawner 的 cap（它是刷新器的节流阀，不是事件掉落的闸门），
+        // 但留一道软顶，免得后期 12 个配额把地上铺满。
+        const m = hero.tank.mods;
+        if (m.salvage > 0 && TYPES.length
+            && ctx.powerups.length < fieldCapOf(m) + UPGRADE.salvageSlack
+            && Math.random() < m.salvage) {
+          const t = actors[i].tank;
+          ctx.powerups.push(new Powerup(t.x, t.y, TYPES[Math.floor(Math.random() * TYPES.length)]));
+        }
+        actors.splice(i, 1);
+        kills++;
+      }
     }
 
     const enemiesAlive = actors.length - 1;
@@ -425,7 +490,12 @@ function playWaves() {
       }
       return;
     }
-    if (quotaLeft <= 0 && enemiesAlive === 0) { inGap = true; gapTimer = WAVE_GAP; return; }
+    if (quotaLeft <= 0 && enemiesAlive === 0) {
+      draftOnce();            // 清波抽卡（同 main：抽完才进喘息）
+      inGap = true;
+      gapTimer = WAVE_GAP;
+      return;
+    }
 
     // 场上不满同屏上限且配额有余 → 补一辆（一帧只补一辆，同 main）
     const spec = waveSpec(waveNo);
@@ -438,6 +508,7 @@ function playWaves() {
       a: Math.atan2(hero.tank.y - spot.y, hero.tank.x - spot.x), // 出生朝玩家
     });
     foe.ctrl = new AiB(foe, level);
+    if (ELITE) applyElite(foe.tank, eliteSpec(waveNo, level)); // 敌人词条（同 main.spawnWaveEnemy）
     actors.push(foe);
     quotaLeft--;
     mix[level]++;
@@ -462,7 +533,7 @@ function playWaves() {
     for (const c of res.cause) if (c.side === "P") cause.push(c.cause);
     if (res.outcome !== "remap") {
       const outcome = res.timeout ? "timeout" : res.outcome;
-      return { wave: waveNo, kills, outcome, elapsed, stuck, mix, cause };
+      return { wave: waveNo, kills, outcome, elapsed, stuck, mix, cause, taken };
     }
 
     // 章节换图（同 main.remapWaveArena）：新图 + 玩家挪回 tl + 清场，
@@ -521,6 +592,9 @@ if (WAVES) {
     + `第 ${STARTWAVE} 波起跑，封顶第 ${MAXWAVE} 波`);
   console.log(`道具池: ${TYPES.length ? TYPES.join(",") : "无"}　地形破坏: ${ERODE ? "开" : "关"}`
     + `　风格: ${opt.style && opt.style !== "all" ? opt.style : "随机(同实机)"}`);
+  console.log(`两层成长：抽卡 ${DRAFT}${DRAFT === "off" ? "" : `（空降预发 ${PREGRANT} 张）`}`
+    + `　敌人词条 ${ELITE ? "开" : "关"}`
+    + `　—— 两项都 off 即阶段 24 行为（控制组）`);
 
   const runs = [];
   const tally = { dead: 0, cap: 0, timeout: 0 };
@@ -545,8 +619,14 @@ if (WAVES) {
   console.log(`清波数（到达 − 起跑）：平均 ${(sum(waves.map((w) => w - STARTWAVE)) / waves.length).toFixed(1)}`
     + `　—— 起跑波固定时这个数才是单波致死率的直接读数`);
   console.log(`收场：玩家死 ${tally.dead} / 封顶 ${tally.cap} / 超时 ${tally.timeout}`);
+  // 存活时长是**空降跑分的主读数**：`--startwave` 抬到第 6 波以上时替身几乎必死在
+  // 起跑波（同屏 ≥2 辆就被背刺，见文末注），「到达波次」于是恒等于起跑波、分辨率归零。
+  // 秒数是连续量不会触底，能量出「同一波变难/变易」的方向与幅度。中位与均值都给：
+  // 均值被偶发的长命 run 拉偏，中位才是典型局。
+  const lives = runs.map((r) => r.elapsed).sort((a, b) => a - b);
   console.log(`击杀：平均 ${(sum(runs.map((r) => r.kills)) / TRIES).toFixed(1)}`
-    + `　存活时长：平均 ${(sum(runs.map((r) => r.elapsed)) / TRIES).toFixed(0)}s`
+    + `　存活时长：中位 ${lives[Math.floor(lives.length / 2)].toFixed(1)}s`
+    + ` 平均 ${(sum(lives) / lives.length).toFixed(1)}s`
     + `　卡住脱困：合计 ${sum(runs.map((r) => r.stuck))} 次`);
 
   // 到达波次直方图（每一波一行，看曲线在哪一段开始劝退）
@@ -563,6 +643,17 @@ if (WAVES) {
     + ` / normal ${(mixAll.normal / mixTotal * 100).toFixed(0)}%`
     + ` / hard ${(mixAll.hard / mixTotal * 100).toFixed(0)}%（共 ${mixTotal} 辆）`);
   console.log(`玩家死于：子弹 ${causeAll.bullet} / 激光 ${causeAll.laser} / 地雷 ${causeAll.mine}`);
+
+  // 抽卡统计：平均抽到几张 + 各卡被抽走的总层数（验证 requires 过滤与卡池覆盖）
+  if (DRAFT !== "off") {
+    const layers = new Map(UPGRADES.map((u) => [u.id, 0]));
+    let totalLayers = 0;
+    for (const r of runs) {
+      for (const [id, n] of r.taken) { layers.set(id, (layers.get(id) ?? 0) + n); totalLayers += n; }
+    }
+    console.log(`抽卡：平均每 run ${(totalLayers / TRIES).toFixed(1)} 张（含预发 ${PREGRANT}）`);
+    console.log("  " + UPGRADES.map((u) => `${u.id} ${layers.get(u.id)}`).join(" / "));
+  }
   console.log("注：替身不是人类——帧级瞄准偏强、只锁 world.players 里第一个活敌偏弱");
   console.log("    （波次里同屏最多 3 辆，被另外两辆背刺的概率比关卡更高）。绝对波次不");
   console.log("    等于人类水平，改 WAVE 数值后重跑同参数看相对位移。");

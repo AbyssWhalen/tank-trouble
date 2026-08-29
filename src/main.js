@@ -17,7 +17,7 @@
 import {
   CANVAS, PLAYER_COLORS, KEY_BINDINGS, MAZE_TIERS, TIER_POOL_BY_MODE,
   WALL, CELL_SIZE, BULLET, TANK, THEME, ROUND_RESTART_DELAY,
-  POWERUP, PICKUP_RATE, MATCH_TARGET, ROUND_INTRO, SLOWMO, STYLE_POOL_BY_MODE, WAVE,
+  POWERUP, PICKUP_RATE, MATCH_TARGET, ROUND_INTRO, SLOWMO, STYLE_POOL_BY_MODE, WAVE, UPGRADE,
 } from "./config.js";
 import { Player } from "./player.js";
 import { generateMaze, destroyWallsInRadius, destroyWallSegments } from "./maze.js";
@@ -28,7 +28,7 @@ import {
   addShake, updateShake, shakeOffset,
 } from "./effects.js";
 import { castLaserPath, LaserBeam, renderLaserPreview } from "./laser.js";
-import { PowerupSpawner } from "./powerup.js";
+import { PowerupSpawner, Powerup, drawPowerupIcon } from "./powerup.js";
 import {
   isJustPressed, endFrame,
   bindMouse, getMousePos, isClicked, getAnyJustPressed,
@@ -36,9 +36,9 @@ import {
 import {
   renderMenu, renderPauseOverlay, renderHud, renderRoundOverBanner,
   renderMatchOverBanner, renderRebindOverlay, renderSettingsOverlay, renderCountdown,
-  renderLevelSelectOverlay, renderLevelOverBanner, renderWaveOverBanner,
+  renderLevelSelectOverlay, renderLevelOverBanner, renderWaveOverBanner, renderDraftOverlay,
   menuAction, pauseAction, rebindAction, settingsAction, matchOverAction,
-  levelSelectAction, levelOverAction, waveOverAction, keyLabel,
+  levelSelectAction, levelOverAction, waveOverAction, draftAction, keyLabel,
 } from "./ui.js";
 import {
   initSettings, saveBindings, resetBindings,
@@ -51,8 +51,11 @@ import {
 import { LEVELS, LEVEL_COUNT, evaluateObjective, normalizeProgress } from "./levels.js";
 import {
   waveSpec, pickEnemyLevel, shouldRemap, pickSpawnSpot,
-  normalizeWaveBest, isBetterRecord,
+  normalizeWaveBest, isBetterRecord, eliteSpec, applyElite,
 } from "./waves.js";
+import {
+  pickOffers, applyUpgrade, fieldCapOf, supplyCountOf,
+} from "./upgrades.js";
 import { initAudio, playSfx, toggleMuted, isMuted } from "./audio.js";
 import {
   loadStats, saveStats, getStats, accuracy, favoriteWeapon,
@@ -142,6 +145,11 @@ let waveQuotaLeft = 0;         // 本波还没投放的敌人数（投放即减�
 let waveGapTimer = 0;          // 波间空场喘息（秒）：不冻结，玩家可趁机捡补给/占位
 let waveBest = normalizeWaveBest(loadWaveBest()); // 历史最高 { wave, kills }
 let waveNewRecord = false;     // 本次是否破纪录（结算横幅提示用）
+// 波间强化抽卡（阶段 25）。**不新增 STATE**：抽卡发生在 PLAYING 内部（底下要照常
+// 画竞技场），也不动波次调度器自己那套 waveNo/waveQuotaLeft/waveGapTimer——走
+// rebind/levelSelect/settingsPanel 那套「模块级浮层对象 + 早退门」的既有范式。
+const draft = { open: false, offers: [], hover: -1 };
+const taken = new Map();       // id → 已抽层数（run 级，setupRound 的 wave 分支清空）
 
 let aiLevel = "normal";        // 选中的 AI 难度档（菜单 chip 单选），开局/R 重开沿用
 // 启用的道具类型集合（菜单多选 chip；空集=整局无道具）。
@@ -171,10 +179,15 @@ window.__devHook = {
   snapshot: () => ({ state, matchScores: [...matchScores], winnerIndex: winner ? winner.index : null }),
   forceScores: (a, b) => { matchScores = [a, b]; },
   setTank: (i, patch) => { if (players[i]) Object.assign(players[i].tank, patch); },
-  // setTank 的只读对偶：验证「某个状态下人还能不能动」需要能读位置（如波间喘息不冻结）
+  // setTank 的只读对偶：验证「某个状态下人还能不能动」需要能读位置（如波间喘息不冻结）。
+  // 阶段 25 起附带改装槽——敌人词条发的装备与头顶图标都要能核（图标截图只能看出
+  // 「有没有」，核「是哪一件」得读状态）。
   tankAt: (i) => {
     const t = players[i]?.tank;
-    return t ? { x: t.x, y: t.y, angle: t.angle, alive: t.alive } : null;
+    return t ? {
+      x: t.x, y: t.y, angle: t.angle, alive: t.alive,
+      scatter: t.scatterShots, laser: t.laserShots, mine: t.mineCharges, shield: t.shield,
+    } : null;
   },
   wallCount: () => (maze ? maze.walls.length : 0),
   erodedCount: () => (maze ? maze.walls.filter((w) => !w.border && w.hp < WALL.hp).length : 0),
@@ -193,6 +206,17 @@ window.__devHook = {
   }),
   // 快进到第 n 波（跳过前面的慢热，专测换图/large 档/同屏上限）
   forceWave: (n) => { if (currentMode === "wave") beginWave(Math.max(1, n | 0)); },
+  // 阶段 25 抽卡与强化：draftState 只读浮层、forceDraft 不清场直接弹（免得为测一张卡
+  // 先打完一波）、pickDraft 走的是与点击/数字键完全同一条 applyDraftPick，
+  // modsOf 是数值挂点的唯一窥视口（玩家侧强化与敌方侧词条读同一个字段集）
+  draftState: () => ({
+    open: draft.open, hover: draft.hover,
+    offers: draft.offers.map((c) => c.id),
+    taken: Object.fromEntries(taken),
+  }),
+  forceDraft: () => openDraft(),
+  pickDraft: (i) => { if (draft.open) applyDraftPick(i | 0); },
+  modsOf: (i) => (players[i] ? { ...players[i].tank.mods } : null),
   blastAt: (x, y) => {
     // 直接触发一次炸墙结算（跳过地雷实体，专测破墙链路：几何/特效/音效/开关）
     if (!maze || !wallBreakEnabled) return 0;
@@ -290,6 +314,12 @@ function setupRound(mode) {
     spawner = new PowerupSpawner(POWERUP.types.filter((t) => enabledPowerups.has(t)));
     waveKills = 0;
     waveNewRecord = false;
+    // 强化是 run 级资产：重来就归零。坦克本体是新建的 → mods 天然中性，
+    // 这里只需要清「抽过什么」的账本（HUD 强化条与抽卡池都读它）。
+    taken.clear();
+    draft.open = false;
+    draft.offers = [];
+    draft.hover = -1;
   } else {
     // P1 左上角格朝右，P2 右下角格朝左，初始背对，给彼此反应空间。
     // pve 模式 P2 是 AI：keys=null + isAI=true，Player 内建 AiController。
@@ -561,12 +591,35 @@ function hitPlayer(p, weapon, killerTank) {
   else pendingSoloSlowmo = true; // 单人模式：是否终局由胜负段确认后再慢镜
   if (!soloMode() && killerIndex >= 0 && killerTank !== p.tank) recordKill(killerIndex, weapon);
   // 波次战绩：敌人被击破就 +1（含互相误伤/踩雷——场是你控的，算你的）
-  if (currentMode === "wave" && p !== players[0]) waveKills++;
+  if (currentMode === "wave" && p !== players[0]) {
+    waveKills++;
+    // 战场回收（阶段 25 的 salvage 卡）：按概率在尸体位置掉一个启用类型的道具。
+    // 绕开 spawner.cap（它是刷新器的节流阀，不是事件掉落的闸门），但留一道软顶——
+    // 后期一波 12 个配额，不然打到中段地上能铺满道具。
+    const m = players[0].tank.mods;
+    if (m.salvage > 0 && spawner.types.length
+        && powerups.length < fieldCapOf(m) + UPGRADE.salvageSlack
+        && Math.random() < m.salvage) {
+      const type = spawner.types[Math.floor(Math.random() * spawner.types.length)];
+      powerups.push(new Powerup(p.tank.x, p.tank.y, type));
+    }
+  }
   return true;
 }
 
 function updatePlaying(dt) {
-  // 0) 对战中按 Esc 进入暂停（不弃局）。暂停菜单提供「继续 / 返回主菜单」。
+  // 0) 波间抽卡浮层门（阶段 25）：**必须排在 Esc 判定之前**——抽卡期间 Esc 被吞掉，
+  //    玩家必须选一张才能继续。抽卡本身已是无限时的暂停，再叠一层暂停没有意义，
+  //    还会把「浮层之上还有浮层」的层级复杂化（对齐 rebind > settingsPanel 的层级纪律）。
+  //    照 introTimer 门的先例只放过 updateEffects：上一波的爆炸能播完，
+  //    别在浮层弹出的瞬间硬切。物理段被整段跳过，所以抽卡期间玩家不可能死。
+  if (draft.open) {
+    updateDraft();
+    updateEffects(dt);
+    return;
+  }
+
+  // 0.1) 对战中按 Esc 进入暂停（不弃局）。暂停菜单提供「继续 / 返回主菜单」。
   //    联机 v2 这里要改成「投降/确认退出」语义，避免一人退局带走别人的对战。
   if (isJustPressed("Escape")) {
     state = STATE.PAUSED;
@@ -911,10 +964,14 @@ function beginWave(n) {
   waveGapTimer = 0;
   if (shouldRemap(n)) remapWaveArena();   // 章节换图（内含 3-2-1 冻结）
   else if (n > 1) playSfx("countTick");   // 新一波来袭的轻提示
-  // 开波补给：强制刷 spec.supply 个。maxOnField 是全局常量，spawner 内部自己守，
-  // 刷不满就是刷不满（场上还有没捡的），不特意为波次抬上限。
+  // 开波补给：强制刷 supplyCountOf 个（基础 spec.supply + 「补给增量」卡的层数）。
+  // **场上上限必须一起抬**（spawner.cap）——不然多刷的补给会被 forceSpawn 的
+  // 「场上已满」那道门静默吃掉，那张卡就是一张空卡。算式与 arena 共用同一份出口。
+  const mods = players[0].tank.mods;
+  spawner.cap = fieldCapOf(mods);
   const tanks = players.filter((p) => p.alive).map((p) => p.tank);
-  for (let i = 0; i < spec.supply; i++) spawner.forceSpawn(maze, powerups, tanks);
+  const supply = supplyCountOf(spec, mods);
+  for (let i = 0; i < supply; i++) spawner.forceSpawn(maze, powerups, tanks);
 }
 
 // 章节换图（每 WAVE.remapEvery 波，且只在空场的波次边界发生）：
@@ -948,6 +1005,9 @@ function spawnWaveEnemy(spec) {
   const level = pickEnemyLevel(spec.mix);
   const angle = Math.atan2(hero.y - spot.y, hero.x - spot.x);
   players.push(new Player(slot, PLAYER_COLORS[slot], null, spot.x, spot.y, angle, true, level));
+  // 敌人词条（阶段 25）：同一辆车随波次变强。确定性（同波同档恒等）——玩家能学会
+  // 「第 26 波起困难敌人开场一发激光」。装备走 applyPowerup，所以 ai.js 自动会用。
+  applyElite(players[players.length - 1].tank, eliteSpec(waveNo, level));
   waveQuotaLeft--;
 }
 
@@ -974,19 +1034,69 @@ function updateWaveFlow(dt) {
   const enemiesAlive = players.length - 1; // 死敌已在段 6.5 出列，这个数是精确的
   if (waveGapTimer > 0) {
     // 波间喘息：**不冻结**——玩家保有控制权，可趁空场捡补给、挪到有利位置。
-    // （只有章节换图才冻结，因为那时地形全变、人也被挪走了）
+    // 冻结的是它前面那一步（抽卡浮层）与章界换图的 3-2-1；喘息本身刻意留给玩家动。
     waveGapTimer = Math.max(0, waveGapTimer - dt);
     if (waveGapTimer === 0) beginWave(waveNo + 1);
     return;
   }
   if (waveQuotaLeft <= 0 && enemiesAlive === 0) {
-    waveGapTimer = WAVE.gap; // 本波清空，进喘息
     playSfx("roundWin");
+    // 清波 → 先抽卡（冻结），选完才进喘息。无卡可抽（全满层 / 道具全关到没有
+    // 一张卡满足 requires）时 openDraft 返回 false，直接进喘息，不弹空浮层。
+    if (!openDraft()) waveGapTimer = WAVE.gap;
     return;
   }
   // 场上不满同屏上限且配额有余 → 补一辆（一帧只补一辆，避免同点挤压）
   const spec = waveSpec(waveNo);
   if (enemiesAlive < spec.concurrent && waveQuotaLeft > 0) spawnWaveEnemy(spec);
+}
+
+// ============================================================
+// 波间强化抽卡（阶段 25）：清波后弹三选一，选完才进喘息。
+// 时序（含章界）：
+//   清空第 5 波 → roundWin 音 → 抽卡（冻结，Esc 无效）
+//     → 1.5s 喘息（不冻结，可捡补给） → beginWave(6) → 换图 + 3-2-1 → 第 6 波
+// 章界前那 1.5s 喘息里捡的道具会被换图清掉（武器槽保留）——阶段 24 既有行为，
+// 不为它加特例分支：多一条 shouldRemap 判断换 1.5 秒不值。
+// ============================================================
+
+// 开抽卡浮层。返回是否真开起来了——没有任何可抽的卡（全满层 / 道具与地形全关
+// 导致 requires 全不满足）时返回 false，调用方直接进喘息。
+function openDraft() {
+  const ctxOffer = { types: enabledPowerups, wallBreak: wallBreakActive() };
+  const offers = pickOffers(taken, ctxOffer);
+  if (!offers.length) return false;
+  draft.open = true;
+  draft.offers = offers;
+  draft.hover = -1;
+  return true;
+}
+
+// 抽卡浮层的每帧输入（冻结期唯一活着的交互）。两条路等价：数字键 1/2/3 与点击。
+function updateDraft() {
+  const mouse = getMousePos();
+  const hit = draftAction(mouse.x, mouse.y, draft.offers.length);
+  draft.hover = hit ? hit.index : -1;
+
+  for (let i = 0; i < draft.offers.length; i++) {
+    if (isJustPressed(`Digit${i + 1}`)) { applyDraftPick(i); return; }
+  }
+  if (isClicked() && hit) applyDraftPick(hit.index);
+}
+
+// 选定一张：施加 → 收浮层 → 进喘息（下一帧调度器落进现成的喘息分支）
+function applyDraftPick(i) {
+  const card = draft.offers[i];
+  if (!card) return;
+  applyUpgrade(players[0].tank, card.id, taken);
+  // 补给增量卡当场生效：场上道具上限立刻抬高，不必等下一波 beginWave
+  spawner.cap = fieldCapOf(players[0].tank.mods);
+  draft.open = false;
+  draft.offers = [];
+  draft.hover = -1;
+  playSfx("pickup"); // 借道具拾取的上行双音（语义就是「拿到了东西」）；
+                     // matchWin 的琶音留给破纪录，别在这里把它用廉价了
+  waveGapTimer = WAVE.gap;
 }
 
 // 波次结算：无自动倒计时（照 LEVEL_OVER 范式）。R/按钮重来，Esc/按钮回菜单。
@@ -1055,6 +1165,16 @@ function render() {
       // 开场倒计时大数字 / GO 余像（叠在场地上，HUD 之上）
       if (introTimer > 0) renderCountdown(ctx, Math.ceil(introTimer / ROUND_INTRO.beat));
       else if (goTimer > 0) renderCountdown(ctx, 0); // 0 = "GO!"
+      // 波间抽卡浮层（最顶层，且此时物理已冻结——见 updatePlaying 的 0) 门）
+      if (draft.open) {
+        renderDraftOverlay(ctx, {
+          offers: draft.offers,
+          taken,
+          wave: waveNo,
+          hover: draft.hover,
+          mouse: getMousePos(),
+        });
+      }
       break;
     case STATE.PAUSED:
       renderArena();
@@ -1144,6 +1264,19 @@ function renderArena() {
   // 子弹在坦克下层
   for (const b of bullets) b.render(ctx);
   for (const p of players) p.tank.render(ctx);
+  // 波次生存：敌方坦克头顶画小号武器图标（阶段 25 词条层的可读性配套）。
+  // **这是故意引入的信息不对称**：pvp/pve 里看不到对手的改装槽，别当 bug 修回去。
+  // 理由是波次生存的 1v3 里敌人装备是每辆车独立抽的，同屏 3 辆哪辆是激光兵必须
+  // 一眼看出来，否则等于随机死亡。只画武器不画护盾——护盾环是坦克自身渲染就有的
+  // 既有暴露信号，再画一遍是纯冗余。
+  if (currentMode === "wave") {
+    for (let i = 1; i < players.length; i++) {
+      const t = players[i].tank;
+      if (!players[i].alive) continue;
+      const type = t.laserShots > 0 ? "laser" : t.scatterShots > 0 ? "scatter" : t.mineCharges > 0 ? "mine" : null;
+      if (type) drawPowerupIcon(ctx, type, t.x, t.y - TANK.radius - 11, 7);
+    }
+  }
   // 特效最上层（爆炸烟团盖住尸体位置）
   for (const e of effects) e.render(ctx);
 
@@ -1166,6 +1299,7 @@ function renderArena() {
       left: waveQuotaLeft,
       kills: waveKills,
       gap: waveGapTimer,
+      taken, // 左下角「已获强化」条（renderUpgradeBar 消费）
     } : null,
   });
 }

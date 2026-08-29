@@ -892,5 +892,293 @@ section("波次曲线 (waves)");
 }
 
 // ============================================================
+section("玩家强化池 (upgrades)");
+{
+  const {
+    UPGRADES, neutralMods, pickOffers, applyUpgrade, upgradeById,
+    isOfferable, TOTAL_STACKS, fieldCapOf, supplyCountOf,
+  } = await import("../src/upgrades.js");
+  const { UPGRADE, POWERUP } = await import("../src/config.js");
+  const ALL = { types: new Set(POWERUP.types), wallBreak: true };
+  const NONE = { types: new Set(), wallBreak: false };
+  const mkTank = () => new Tank(100, 100, 0, "#fff");
+  // 把某张卡刷到满层（返回实际生效层数）
+  const maxOut = (tank, id, taken) => {
+    let n = 0;
+    while (applyUpgrade(tank, id, taken)) n++;
+    return n;
+  };
+
+  {
+    const ids = UPGRADES.map((u) => u.id);
+    const uniq = new Set(ids).size === ids.length;
+    const shaped = UPGRADES.every(
+      (u) => u.id && u.label && u.desc && Number.isInteger(u.cap) && u.cap >= 1 && typeof u.apply === "function"
+    );
+    check("卡池 id 唯一、字段齐全、cap ≥ 1", uniq && shaped, `${ids.length} 张 / ${TOTAL_STACKS} 层`);
+  }
+  {
+    // 中性值逐项钉死。这条是**结构护栏**：以后给 Tank 加了 mod 字段却忘了在
+    // neutralMods 登记，或偷偷把中性值改成非中性，这里会红。
+    const m = neutralMods();
+    const ok =
+      m.speed === 1 && m.turn === 1 && m.maxAlive === 0 && m.erode === 0 &&
+      m.selfSafe === false && m.scatterBonus === 0 && m.laserBonus === 0 &&
+      m.mineBonus === 0 && m.shieldBonus === 0 && m.supplyBonus === 0 && m.salvage === 0;
+    check("neutralMods 中性值逐项钉死", ok && Object.keys(m).length === 11, `${Object.keys(m).length} 个字段`);
+  }
+  {
+    // 新 Tank 即中性 → pvp/pve/challenge 三个模式的算式退化为原常量
+    const a = JSON.stringify(mkTank().mods), b = JSON.stringify(neutralMods());
+    check("新建 Tank 的 mods 即中性", a === b);
+  }
+  {
+    // 抽卡：不重复、数量对、注入 rand 后确定
+    const offers = pickOffers(new Map(), ALL, 3, () => 0);
+    const ids = offers.map((o) => o.id);
+    const again = pickOffers(new Map(), ALL, 3, () => 0).map((o) => o.id);
+    check("pickOffers 不重复 + 注入 rand 确定", new Set(ids).size === 3 && ids.join() === again.join(), ids.join("/"));
+  }
+  {
+    // 满层的卡不再出现
+    const taken = new Map(), t = mkTank();
+    maxOut(t, "speed", taken);
+    let seen = false;
+    for (let i = 0; i < 200; i++) {
+      if (pickOffers(taken, ALL, 3, Math.random).some((o) => o.id === "speed")) seen = true;
+    }
+    check("满层卡不再进抽卡池", !seen && taken.get("speed") === upgradeById("speed").cap);
+  }
+  {
+    // requires：道具全关 + 地形关 → 只剩无条件卡
+    const pool = UPGRADES.filter((u) => isOfferable(u, new Map(), NONE)).map((u) => u.id);
+    const bad = pool.filter((id) => ["scatterUp", "laserUp", "mineUp", "shieldUp", "supply", "salvage", "drill"].includes(id));
+    check("requires 生效（道具/地形全关时空卡缺席）", bad.length === 0 && pool.length > 0, `剩 ${pool.join("/")}`);
+  }
+  {
+    // 全满层 → 抽不出卡（main 走「静默跳过抽卡」分支）
+    const taken = new Map(), t = mkTank();
+    let total = 0;
+    for (const u of UPGRADES) total += maxOut(t, u.id, taken);
+    const empty = pickOffers(taken, ALL, 3, Math.random);
+    check("全满层返回空数组", empty.length === 0 && total === TOTAL_STACKS, `共 ${total} 层`);
+  }
+  {
+    // 可选卡不足 count 时出剩下的，不补空、不重复
+    const taken = new Map(), t = mkTank();
+    for (const u of UPGRADES) if (u.id !== "speed" && u.id !== "ammo") maxOut(t, u.id, taken);
+    const offers = pickOffers(taken, ALL, 3, Math.random);
+    check("可选卡不足时只出剩下的", offers.length === 2 && new Set(offers.map((o) => o.id)).size === 2);
+  }
+  {
+    // 每张卡把目标字段推向预期方向，且到 cap 后不再生效
+    const t = mkTank(), taken = new Map();
+    const base = neutralMods();
+    const dirs = [];
+    for (const u of UPGRADES) {
+      const before = JSON.stringify(t.mods);
+      applyUpgrade(t, u.id, taken);
+      dirs.push(JSON.stringify(t.mods) !== before); // 每张卡至少改了一个字段
+    }
+    const grew =
+      t.mods.speed > base.speed && t.mods.turn > base.turn && t.mods.maxAlive > base.maxAlive &&
+      t.mods.erode > base.erode && t.mods.selfSafe === true && t.mods.scatterBonus > 0 &&
+      t.mods.laserBonus > 0 && t.mods.mineBonus > 0 && t.mods.shieldBonus > 0 &&
+      t.mods.supplyBonus > 0 && t.mods.salvage > 0;
+    check("每张卡各推一个字段、方向正确", dirs.every(Boolean) && grew);
+  }
+  {
+    const t = mkTank(), taken = new Map();
+    const n = maxOut(t, "ammo", taken);
+    const refused = applyUpgrade(t, "ammo", taken) === false && taken.get("ammo") === n;
+    const unknown = applyUpgrade(t, "nope", taken) === false;
+    check("到 cap 后拒绝、未知 id 拒绝", refused && unknown && n === upgradeById("ammo").cap);
+  }
+  {
+    // **一发致死护栏**：全部卡刷到满层后，mods 的键集合必须与中性完全相同，
+    // 且 alive 不被任何卡触碰——挡住以后偷偷加「多一条命 / 装甲挡两发」。
+    const t = mkTank(), taken = new Map();
+    for (const u of UPGRADES) maxOut(t, u.id, taken);
+    const keys = Object.keys(t.mods).sort().join(",");
+    const neutralKeys = Object.keys(neutralMods()).sort().join(",");
+    const noLife = !/lives|hp|armor|health|revive/i.test(JSON.stringify(t.mods) + Object.keys(t.mods).join());
+    check("满层后键集合不变 + alive 未被触碰 + 无命值字段", keys === neutralKeys && t.alive === true && noLife);
+  }
+  {
+    // 极速护栏：ai.js interceptTime 的唯一正根前提是「坦克极速 < 弹速」，
+    // 满层 speed 必须守住这条，否则 AI 的拦截预判会解出双根/无根。
+    const t = mkTank(), taken = new Map();
+    maxOut(t, "speed", taken);
+    const top = TANK.moveSpeed * t.mods.speed;
+    check("满层移速仍低于弹速（拦截预判前提）", top < BULLET.speed, `${top.toFixed(1)} < ${BULLET.speed}`);
+  }
+  {
+    // 扩容卡只加**拾取时的给予量**，不给凭空存货
+    const t = mkTank(), taken = new Map();
+    maxOut(t, "scatterUp", taken); maxOut(t, "laserUp", taken);
+    maxOut(t, "mineUp", taken); maxOut(t, "shieldUp", taken);
+    const idle = t.scatterShots === 0 && t.laserShots === 0 && t.mineCharges === 0 && !t.shield;
+    t.applyPowerup("scatter");
+    const s = t.scatterShots === POWERUP.scatter.shots + UPGRADE.scatterAdd * 2;
+    t.applyPowerup("shield");
+    const sh = Math.abs(t.shieldTimer - (POWERUP.shield.duration + UPGRADE.shieldAdd * 2)) < 1e-9;
+    t.applyPowerup("laser");
+    const l = t.laserShots === POWERUP.laser.shots + UPGRADE.laserAdd * 2 && t.scatterShots === 0;
+    t.applyPowerup("mine");
+    const mn = t.mineCharges === POWERUP.mine.charges + UPGRADE.mineAdd * 2 && t.laserShots === 0;
+    check("扩容卡只在拾取时生效 + 武器槽仍互斥", idle && s && sh && l && mn, `散${t.scatterShots}/雷${t.mineCharges}`);
+  }
+  {
+    // 破障弹头：写到子弹实例上（默认 1 = 阶段 18 原行为）
+    const plain = new Bullet(0, 0, 1, 0, null);
+    const t = mkTank(), taken = new Map();
+    const n = maxOut(t, "drill", taken);
+    const b = t.spawnBullet(0, []);
+    const b0 = mkTank().spawnBullet(0, []);
+    check("erodePower 默认 1、破障弹头写实例", plain.erodePower === 1 && b0.erodePower === 1 && b.erodePower === 1 + n);
+  }
+  {
+    // 跳弹免疫：只改「自己的弹能否打自己」，对别人零影响
+    const t = mkTank(), taken = new Map();
+    const other = mkTank();
+    const b = t.spawnBullet(0, []);
+    b.bounces = 3; b.age = 5;                       // 已反弹、宽限期早过
+    const beforeSelf = b.canHit(t), beforeOther = b.canHit(other);
+    applyUpgrade(t, "ricochet", taken);
+    check("跳弹免疫只豁免自己", beforeSelf === true && beforeOther === true && b.canHit(t) === false && b.canHit(other) === true);
+  }
+  {
+    // 补给类卡的共同出口（main 与 arena 必须读同一份算式）
+    const m = neutralMods();
+    const base = fieldCapOf(m) === POWERUP.maxOnField && supplyCountOf({ supply: 1 }, m) === 1;
+    m.supplyBonus = 2;
+    const up = fieldCapOf(m) === POWERUP.maxOnField + 2 && supplyCountOf({ supply: 2 }, m) === 4;
+    const nullSafe = fieldCapOf(null) === POWERUP.maxOnField && supplyCountOf(null, null) === 1;
+    check("fieldCapOf/supplyCountOf 单一出口", base && up && nullSafe);
+  }
+  {
+    // PowerupSpawner 的两道门都读实例 cap（否则 supply 卡静默失效）
+    const { PowerupSpawner } = await import("../src/powerup.js");
+    const sp = new PowerupSpawner(["shield"]);
+    const mz = generateMaze(MAZE_TIERS.small.cols, MAZE_TIERS.small.rows, "sparse");
+    const field = [];
+    while (sp.forceSpawn(mz, field, [])) {}
+    const atDefault = field.length === POWERUP.maxOnField;
+    sp.cap = POWERUP.maxOnField + 2;
+    while (sp.forceSpawn(mz, field, [])) {}
+    check("spawner 场上上限走实例 cap", atDefault && field.length === sp.cap, `${field.length} 个`);
+  }
+
+
+
+}
+
+// ============================================================
+section("敌人词条 (waves elite)");
+{
+  const { eliteStep, eliteCreep, eliteSpec, applyElite } = await import("../src/waves.js");
+  const { ENEMY_TRAIT } = await import("../src/config.js");
+  const TIERS = ["easy", "normal", "hard"];
+  const mkTank = () => new Tank(100, 100, 0, "#fff");
+
+  {
+    const steps = Array.from({ length: 40 }, (_, i) => eliteStep(i + 1));
+    const zeroEarly = steps.slice(0, ENEMY_TRAIT.from - 1).every((s) => s === 0);
+    const mono = steps.every((s, i) => i === 0 || s >= steps[i - 1]);
+    const capped = steps.every((s) => s <= ENEMY_TRAIT.stepCap);
+    // 台阶落在 6/11/16/21/26（与 remapEvery 同相位：换一张图升一档）
+    const edges = [6, 11, 16, 21, 26].every((w, i) => eliteStep(w) === i + 1 && eliteStep(w - 1) === i);
+    check("档位：前 5 波恒 0、单调不减、不超 cap、台阶在章界", zeroEarly && mono && capped && edges, steps.slice(0, 30).join(""));
+  }
+  {
+    const zero = Array.from({ length: ENEMY_TRAIT.creepFrom }, (_, i) => eliteCreep(i + 1)).every((c) => c === 0);
+    const full = eliteCreep(ENEMY_TRAIT.creepFrom + 1 / ENEMY_TRAIT.creepRate);
+    const bounded = Array.from({ length: 60 }, (_, i) => eliteCreep(i + 1)).every((c) => c >= 0 && c <= 1);
+    check("连续倍率：creepFrom 前恒 0、上界 1、第 31 波打满", zero && bounded && Math.abs(full - 1) < 1e-9);
+  }
+  {
+    // 难度必须**一路都在动**：这是整个阶段 25 的存在理由。任何相邻两个章界之间
+    // 「装备与倍率逐字相同」就是躺平——第 16 波与第 26 波原本就是这样（阶段 24 的
+    // 封顶），修掉它才有这一期。把 6/11/16/21/26/31 六个采样点两两钉住。
+    const fp = (n) => TIERS.map((t) => JSON.stringify(eliteSpec(n, t))).join("|");
+    const marks = [1, 6, 11, 16, 21, 26, 31];
+    const moving = marks.every((n, i) => i === 0 || fp(n) !== fp(marks[i - 1]));
+    // 而第 31 波之后是刻意的终点（装备到顶 + 倍率打满），必须真的不再变
+    const settled = fp(31) === fp(45);
+    check("章界处必有增量（1/6/11/16/21/26/31 两两不同），第 31 波后封顶", moving && settled);
+  }
+  {
+    // 第 1~5 波：坦克状态与 mods 逐字不变（词条层对早期波次零影响）
+    let same = true;
+    for (let n = 1; n < ENEMY_TRAIT.from; n++) {
+      for (const tier of TIERS) {
+        const t = mkTank(), before = JSON.stringify(t);
+        applyElite(t, eliteSpec(n, tier));
+        if (JSON.stringify(t) !== before) same = false;
+      }
+    }
+    check("词条前的波次坦克状态逐字不变", same);
+  }
+  {
+    // hard 永不带盾（berserkMode 会让它放弃躲弹，那是它最强的资产）
+    // 只有 hard 带激光（低档持激光对玩家不可读）
+    let ok = true;
+    for (let n = 1; n <= 60; n++) {
+      for (const tier of TIERS) {
+        const e = eliteSpec(n, tier);
+        if (tier === "hard" && e.shield) ok = false;
+        if (e.weapon === "laser" && tier !== "hard") ok = false;
+        if (e.weapon === "mine") ok = false;              // 敌人永不带雷
+      }
+    }
+    check("档位白名单：hard 无盾 / 激光仅 hard / 永不带雷", ok);
+  }
+  {
+    // 武器互斥 + 永不写 mods.maxAlive（ai.js 把 BULLET.maxAlive-1 硬编码成自己的
+    // 弹药预算，给敌人加弹容它不会用，白给）
+    let exclusive = true, ammoUntouched = true, capOk = true;
+    for (let n = 1; n <= 60; n++) {
+      for (const tier of TIERS) {
+        const t = mkTank();
+        applyElite(t, eliteSpec(n, tier));
+        const armed = [t.scatterShots, t.laserShots, t.mineCharges].filter((v) => v > 0).length;
+        if (armed > 1) exclusive = false;
+        if (t.mods.maxAlive !== 0 || t.mods.selfSafe !== false) ammoUntouched = false;
+        if (t.mods.speed > 1 + ENEMY_TRAIT.speedCap + 1e-9 || t.mods.turn > 1 + ENEMY_TRAIT.turnCap + 1e-9) capOk = false;
+        if (TANK.moveSpeed * t.mods.speed >= BULLET.speed) capOk = false; // 拦截预判前提
+      }
+    }
+    check("武器互斥 / 不碰弹容与跳弹免疫 / 倍率守界", exclusive && ammoUntouched && capOk);
+  }
+  {
+    // 满档 hard = 激光；满档 normal = 盾 + 加量散射（第 4 档起加量翻倍 → 3+6=9 发）
+    const h = mkTank(), nm = mkTank();
+    applyElite(h, eliteSpec(40, "hard"));
+    applyElite(nm, eliteSpec(40, "normal"));
+    const hardOk = h.laserShots > 0 && !h.shield && h.scatterShots === 0;
+    const normOk = nm.shield && nm.scatterShots === POWERUP.scatter.shots + ENEMY_TRAIT.scatterBonus * 2
+      && nm.laserShots === 0;
+    check("满档：hard 持激光无盾 / normal 盾 + 双倍加量散射", hardOk && normOk, `hard 激光${h.laserShots} / normal 散${nm.scatterShots}`);
+  }
+  {
+    // 散射加量分两级：第 3 档 +1 单位、第 4 档起 +2 单位（换成激光后归零）
+    const at = (n) => eliteSpec(n, "normal").scatterBonus;
+    const laserGone = eliteSpec(26, "hard").scatterBonus === 0;
+    check("散射加量两级：16 波 +3 / 21 波起 +6 / 持激光归零",
+      at(11) === 0 && at(16) === ENEMY_TRAIT.scatterBonus
+      && at(21) === ENEMY_TRAIT.scatterBonus * 2 && at(31) === ENEMY_TRAIT.scatterBonus * 2 && laserGone,
+      `${at(11)}/${at(16)}/${at(21)}/${at(31)}`);
+  }
+  {
+    // 持雷超时不适用（敌人不带雷）；带雷时若有人直写 mineCharges 会被 update 清掉，
+    // 所以这条顺手把「发装备必须走 applyPowerup」钉住：mineHoldTimer 必须被设上
+    const t = mkTank();
+    t.applyPowerup("mine");
+    t.update(0.016, [], { turn: 0, move: 0 });
+    check("发装备走 applyPowerup 才不会被超时清掉", t.mineCharges > 0 && t.mineHoldTimer > 0);
+  }
+}
+
+// ============================================================
 console.log(`\n${pass} pass, ${fail} fail`);
 process.exit(fail ? 1 : 0);
