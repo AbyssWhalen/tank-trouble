@@ -46,7 +46,7 @@ import {
 } from "../src/config.js";
 import { LEVELS, evaluateObjective } from "../src/levels.js";
 import {
-  waveSpec, pickEnemyLevel, shouldRemap, pickSpawnSpot, eliteSpec, applyElite,
+  waveSpec, pickEnemyLevel, shouldRemap, pickSpawnSpot, eliteSpec, applyElite, countArmedLasers,
 } from "../src/waves.js";
 import {
   pickOffers, applyUpgrade, fieldCapOf, supplyCountOf, UPGRADES,
@@ -508,7 +508,11 @@ function playWaves() {
       a: Math.atan2(hero.tank.y - spot.y, hero.tank.x - spot.x), // 出生朝玩家
     });
     foe.ctrl = new AiB(foe, level);
-    if (ELITE) applyElite(foe.tank, eliteSpec(waveNo, level)); // 敌人词条（同 main.spawnWaveEnemy）
+    // 敌人词条（同 main.spawnWaveEnemy）：激光按同屏配额发，先数场上还有几把上膛的
+    if (ELITE) {
+      const armed = countArmedLasers(actors.filter((a) => a !== hero && a.alive).map((a) => a.tank));
+      applyElite(foe.tank, eliteSpec(waveNo, level, armed));
+    }
     actors.push(foe);
     quotaLeft--;
     mix[level]++;

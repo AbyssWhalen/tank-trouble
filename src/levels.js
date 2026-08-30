@@ -48,7 +48,13 @@ export const LEVELS = [
     map: { tier: "medium", style: "rooms" },
     enemies: [{ level: "normal", spawn: "br" }],
     powerups: [], wallBreak: false,
-    player: { weapon: "laser", shots: 99 },
+    // 10 发而不是原来的 99 发。**这一条是设计判断，arena 量不出来**：这关三档替身
+    // 通关率 98/100/98，换成 6 发还是 98/98/100——因为「持激光的 AI 是帧级几何精确
+    // 狙击手」这条偏差与档位无关（CLAUDE.md 记的纯激光关虚高），跨档对比在这关失效。
+    // 改的理由与难度数字无关：99 发 = 无资源约束，而这关的 hint 要求「算反弹角」，
+    // 无限弹把该想的那一步删掉了。打空之后退化成一场公平 1v1（不是死局），
+    // 所以下限安全。真实难度只能实机人工验
+    player: { weapon: "laser", shots: 10 },
     mutators: {},
     hint: "预瞄线会暴露你——利用反弹打它看不到的角度",
   },
@@ -80,14 +86,19 @@ export const LEVELS = [
     hint: "它会跳弹吊射、反弹激光狙——像打一个真人高手",
   },
   {
-    id: 8, name: "最终试炼", desc: "120 秒内击败困难+普通双人组",
+    id: 8, name: "最终试炼", desc: "120 秒内击败困难主将 + 一名杂兵",
     objective: "eliminateTimed",
     map: { tier: "medium", style: "symmetric" },
-    enemies: [{ level: "hard", spawn: "br" }, { level: "normal", spawn: "tr" }],
+    // 副手是 easy 而不是 normal（阶段 26 实测改）：hard+normal 时替身三档通关率
+    // 0/10/10——**技术档差只有 10pp**，那不是难是不讲理（1v2 双高手交叉火力，
+    // 两边都在躲弹时玩家没有任何操作空间）。换成 hard+easy 后 0/23/25：
+    // 简单档仍打不过（0%），会玩的能过（23%）——难度回到「技术能兑现」的区间。
+    // 顺带排除了「时限太紧」这个猜测：150s 版实测 0/5/15，替身是被打死不是被拖死
+    enemies: [{ level: "hard", spawn: "br" }, { level: "easy", spawn: "tr" }],
     powerups: ["scatter", "shield", "laser", "mine"], wallBreak: true,
     player: { shield: true },
     mutators: { timeLimit: 120 },
-    hint: "开局有盾。速战速决，拖久必败",
+    hint: "开局有盾。先清掉杂兵再单挑主将，速战速决",
   },
 ];
 

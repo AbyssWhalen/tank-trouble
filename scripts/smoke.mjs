@@ -1076,8 +1076,8 @@ section("玩家强化池 (upgrades)");
 // ============================================================
 section("敌人词条 (waves elite)");
 {
-  const { eliteStep, eliteCreep, eliteSpec, applyElite } = await import("../src/waves.js");
-  const { ENEMY_TRAIT } = await import("../src/config.js");
+  const { eliteStep, eliteCreep, eliteSpec, applyElite, laserCapAt, countArmedLasers } = await import("../src/waves.js");
+  const { ENEMY_TRAIT, WAVE } = await import("../src/config.js");
   const TIERS = ["easy", "normal", "hard"];
   const mkTank = () => new Tank(100, 100, 0, "#fff");
 
@@ -1086,13 +1086,14 @@ section("敌人词条 (waves elite)");
     const zeroEarly = steps.slice(0, ENEMY_TRAIT.from - 1).every((s) => s === 0);
     const mono = steps.every((s, i) => i === 0 || s >= steps[i - 1]);
     const capped = steps.every((s) => s <= ENEMY_TRAIT.stepCap);
-    // 台阶落在 6/11/16/21/26（与 remapEvery 同相位：换一张图升一档）
-    const edges = [6, 11, 16, 21, 26].every((w, i) => eliteStep(w) === i + 1 && eliteStep(w - 1) === i);
+    // 台阶落在 6/11/16/21/26/31（与 remapEvery 同相位：换一张图升一档）
+    const edges = [6, 11, 16, 21, 26, 31].every((w, i) => eliteStep(w) === i + 1 && eliteStep(w - 1) === i);
     check("档位：前 5 波恒 0、单调不减、不超 cap、台阶在章界", zeroEarly && mono && capped && edges, steps.slice(0, 30).join(""));
   }
   {
     const zero = Array.from({ length: ENEMY_TRAIT.creepFrom }, (_, i) => eliteCreep(i + 1)).every((c) => c === 0);
-    const full = eliteCreep(ENEMY_TRAIT.creepFrom + 1 / ENEMY_TRAIT.creepRate);
+    // ceil：creepRate 不必是 1/整数（0.045 → 22.2 波爬满），波号只取整数，所以取上界那一波
+    const full = eliteCreep(ENEMY_TRAIT.creepFrom + Math.ceil(1 / ENEMY_TRAIT.creepRate));
     const bounded = Array.from({ length: 60 }, (_, i) => eliteCreep(i + 1)).every((c) => c >= 0 && c <= 1);
     check("连续倍率：creepFrom 前恒 0、上界 1、第 31 波打满", zero && bounded && Math.abs(full - 1) < 1e-9);
   }
@@ -1176,6 +1177,35 @@ section("敌人词条 (waves elite)");
     t.applyPowerup("mine");
     t.update(0.016, [], { turn: 0, move: 0 });
     check("发装备走 applyPowerup 才不会被超时清掉", t.mineCharges > 0 && t.mineHoldTimer > 0);
+  }
+  {
+    // 激光配额（阶段 26）：同屏已上膛激光兵上限 0 → 1(21波) → 2(26波) → 3(31波起)，
+    // 且永不超过同屏上限（否则配额写了个到不了的数）
+    const caps = [1, 6, 11, 16, 21, 26, 31, 45].map((n) => laserCapAt(eliteStep(n)));
+    const mono = caps.every((c, i) => i === 0 || c >= caps[i - 1]);
+    const bounded = caps.every((c) => c <= WAVE.concurrentCap);
+    check("激光配额：21/26/31 波 1/2/3 把，之前恒 0，单调且不超同屏上限",
+      caps.join(",") === "0,0,0,0,1,2,3,3" && mono && bounded, caps.join(","));
+  }
+  {
+    // 配额满了的同档友军退回**加量散射**（而不是空手，也不是第二把激光）
+    const first = eliteSpec(31, "hard", 0), third = eliteSpec(31, "hard", 2), over = eliteSpec(31, "hard", 3);
+    const fallback = eliteSpec(21, "hard", 1);
+    check("配额未满拿激光 / 配额已满退回加量散射",
+      first.weapon === "laser" && third.weapon === "laser" && over.weapon === "scatter"
+      && fallback.weapon === "scatter" && fallback.scatterBonus === ENEMY_TRAIT.scatterBonus * 2,
+      `${first.weapon}/${third.weapon}/${over.weapon}/${fallback.weapon}`);
+  }
+  {
+    // 计数口：只数**还上膛**的（打完那发就不算——配额限的是同屏瞬时狙击手数量）。
+    // main 与 arena 共用这一个出口，两边各写一份必跑偏
+    const armed = mkTank(), spent = mkTank(), plain = mkTank();
+    armed.applyPowerup("laser");
+    spent.applyPowerup("laser");
+    spent.laserShots = 0;
+    check("countArmedLasers 只数上膛的激光兵（含 null 容错）",
+      countArmedLasers([armed, spent, plain, null]) === 1 && countArmedLasers([]) === 0
+      && countArmedLasers(null) === 0);
   }
 }
 

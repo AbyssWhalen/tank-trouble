@@ -51,7 +51,7 @@ import {
 import { LEVELS, LEVEL_COUNT, evaluateObjective, normalizeProgress } from "./levels.js";
 import {
   waveSpec, pickEnemyLevel, shouldRemap, pickSpawnSpot,
-  normalizeWaveBest, isBetterRecord, eliteSpec, applyElite,
+  normalizeWaveBest, isBetterRecord, eliteSpec, applyElite, countArmedLasers,
 } from "./waves.js";
 import {
   pickOffers, applyUpgrade, fieldCapOf, supplyCountOf,
@@ -1005,9 +1005,11 @@ function spawnWaveEnemy(spec) {
   const level = pickEnemyLevel(spec.mix);
   const angle = Math.atan2(hero.y - spot.y, hero.x - spot.x);
   players.push(new Player(slot, PLAYER_COLORS[slot], null, spot.x, spot.y, angle, true, level));
-  // 敌人词条（阶段 25）：同一辆车随波次变强。确定性（同波同档恒等）——玩家能学会
-  // 「第 26 波起困难敌人开场一发激光」。装备走 applyPowerup，所以 ai.js 自动会用。
-  applyElite(players[players.length - 1].tank, eliteSpec(waveNo, level));
+  // 敌人词条（阶段 25）：同一辆车随波次变强。确定性（同波同档同激光配额恒等）——玩家能
+  // 学会「第 21 波起场上有一把激光」。装备走 applyPowerup，所以 ai.js 自动会用。
+  // 激光按同屏配额发（阶段 26），所以要先数场上还有几把上膛的。
+  const armed = countArmedLasers(players.slice(1).filter((p) => p.alive).map((p) => p.tank));
+  applyElite(players[players.length - 1].tank, eliteSpec(waveNo, level, armed));
   waveQuotaLeft--;
 }
 

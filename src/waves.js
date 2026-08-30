@@ -81,12 +81,19 @@ export function shouldRemap(n) {
   return n > 1 && chapterOf(n) !== chapterOf(n - 1);
 }
 
-// 波次刷点：在离玩家最远的空格里挑一个。纯函数（rand 可注入 → smoke 可断言）。
+// 波次刷点：在离玩家**约 spawnIdealCells 格**的空格里挑一个。纯函数（rand 可注入 → smoke 可断言）。
 // 为什么不复用 powerup 的 pickSpot：那个是「随机试 12 次」，要的是随机分布；
-// 刷敌人要的是「离玩家远」这个方向性，且必须成功（返回 null 会让本波卡住）。
+// 刷敌人要的是方向性（不贴脸、不远到浪费时间），且必须成功（返回 null 会让本波卡住）。
 // 也不能用 setupRound 那 4 个硬编码角位——同屏 3 辆敌人 + 玩家就把角位占满了。
+//
+// **为什么不是「越远越好」**（阶段 26 实测修正）：原规则取最远的三分之一，
+// 而 large 图对角 15 格、medium 只有 11 格，于是「最远」在 large 上意味着多走
+// 4~5 格 ≈ 3 秒的无交战时间。实测这一条让第 11 波换 large 图后中位存活
+// **反而涨 2.4~3.8s**（同参数 medium 7.4s vs large 9.8s）——地图档位变成了一个
+// 方向朝反的难度旋钮：第 3 辆敌人上场那一章，难度是往下掉的。
+// 改成「贴住理想距离」后两个档位的交战延迟对齐，地图档位回归它该管的事（几何与回廊宽窄）。
 //   maze     当前地图（读 cols/rows/walls）
-//   hero     玩家坦克位置（远离目标）
+//   hero     玩家坦克位置（距离基准）
 //   occupied 场上所有坦克（含玩家）——不许贴脸空降
 // 找不到合法点返回 null（图挤到连 1 格安全距都腾不出来，调用方下帧再试）。
 export function pickSpawnSpot(maze, hero, occupied, rand = Math.random) {
@@ -105,12 +112,14 @@ export function pickSpawnSpot(maze, hero, occupied, rand = Math.random) {
     }
   }
 
+  const ideal = WAVE.spawnIdealCells * CELL_SIZE;
   // 安全距逐级放宽：优先不贴脸，但挤到没法讲究时也得把人刷出来（宁近勿卡波）
   for (const gate of [WAVE.spawnSafeCells, 1.5, 1]) {
     const ok = cells.filter((c) => c.near >= gate * CELL_SIZE);
     if (!ok.length) continue;
-    ok.sort((a, b) => b.far - a.far);
-    // 最远的三分之一里随机取，别每波都从同一个角冒出来（可预测=可蹲守）
+    // 离理想距离最近的排前面；同偏差时取更远的那个（宁远勿贴脸）
+    ok.sort((a, b) => Math.abs(a.far - ideal) - Math.abs(b.far - ideal) || b.far - a.far);
+    // 最贴合的三分之一里随机取，别每波都从同一个位置冒出来（可预测=可蹲守）
     const top = ok.slice(0, Math.max(1, Math.ceil(ok.length / 3)));
     return top[Math.min(top.length - 1, Math.floor(clamp(rand(), 0, 1) * top.length))];
   }
@@ -141,8 +150,9 @@ export function pickSpawnSpot(maze, hero, occupied, rand = Math.random) {
 //   认全路径反弹解，会等扫中了才开火。对玩家来说前者是随机死亡，后者是可读威胁。
 // ============================================================
 
-// 词条档位：0 无 / 1 第一件 / 2 第二件 / 3 武器加量 / 4 加量翻倍 / 5 hard 换激光。
-// 台阶落在 6/11/16/21/26 波——与 remapEvery 同相位，「换一张图升一档」。
+// 词条档位：0 无 / 1 第一件 / 2 第二件 / 3 武器加量 / 4 加量翻倍+第一把激光 /
+// 5 两把激光 / 6 三把激光。台阶落在 6/11/16/21/26/31 波——与 remapEvery 同相位，
+// 「换一张图升一档」。
 export function eliteStep(n) {
   const wave = Math.max(1, Math.floor(n));
   if (wave < ENEMY_TRAIT.from) return 0;
@@ -152,27 +162,50 @@ export function eliteStep(n) {
   );
 }
 
-// 连续爬升进度 0..1（creepFrom 波起线性，满于 creepFrom + 1/creepRate 波 = 第 31 波）。
+// 连续爬升进度 0..1（creepFrom 波起线性，满于 creepFrom + ceil(1/creepRate) 波 = 第 31 波）。
 // **这条是整条难度曲线的承重墙**，不是装备阶梯的补充：实测装备阶梯里只有「hard 换激光」
 // 一级量得出来（第 26 波中位存活 7.3→4.8s），另外三级（盾 / 散射 / 散射加量）全落在
 // 1.2s 的噪声底以内——AI 的出手节奏闸门在 cfg.fireCooldown，弹药与盾都不是它的约束。
-// 而移速/转速是物理量，不经过任何 AI 决策，所以从换大图那章（第 11 波）就起爬，
-// 一路给到第 31 波，把装备阶梯量不出来的那三级波段填上。
+// 而移速/转速是物理量，不经过任何 AI 决策，所以起爬点前移到第 8 波（阶段 26：11 → 8）：
+// 第 6→11 波那一章原本毫无增量（creep 按构造恒为 0、同屏 2→3 量不出来、装备第 2 档
+// 只是给盾档发散射），是一段躺平。**刻意不落在章界上**——装备与同屏都踩 5 的倍数，
+// 物理倍率错开相位连续爬，叠起来才不是「五波不动、一波暴涨」。一路给到第 31 波打满。
 export function eliteCreep(n) {
   return clamp((Math.max(1, Math.floor(n)) - ENEMY_TRAIT.creepFrom) * ENEMY_TRAIT.creepRate, 0, 1);
 }
 
-// 第 n 波、某 AI 档位的敌人该带什么。纯函数（同 (n,tier) 恒等，无随机）——
-// 确定性是刻意的：玩家能学会「第 26 波起困难敌人开场一发激光」，
-// 而不是每辆车随机开盲盒。哪辆车带什么由头顶图标当场告知（渲染读活体状态）。
-export function eliteSpec(n, tier = "normal") {
+// 同屏「已上膛激光兵」上限（阶段 26）：随档位 1 → 2 → 3，封顶 concurrentCap。
+// 为什么激光要按**数量**给而不是按档位全给——旧规则第 26 波起每一辆 hard 都持激光，
+// 而 hardCap 0.8 × 同屏 3 ≈ 同屏 2.4 把 hitscan 狙。中位存活 5.6s 还不是最糟的，
+// 最糟的是技术档差塌了：normal 替身 5.6s vs hard 替身 5.7s（第 11 波两者差 6.3s）。
+// 技术不再影响结果 = 不是难，是不讲理。详细理由与数据在 config 的 laserQuota 注释。
+export function laserCapAt(step) {
+  const q = ENEMY_TRAIT.laserQuota;
+  const i = Math.floor(step) - ENEMY_TRAIT.laserFrom;
+  if (i < 0 || !q.length) return 0;
+  return Math.min(q[Math.min(i, q.length - 1)], WAVE.concurrentCap);
+}
+
+// 场上「已上膛」的激光兵数。打完那一发就不再计入——配额限的是同屏瞬时狙击手数量，
+// 不是这辆车这辈子摸过激光。main 与 arena 共用这一个计数口，别各写一份。
+export function countArmedLasers(tanks) {
+  return (tanks || []).reduce((n, t) => n + (t && t.laserShots > 0 ? 1 : 0), 0);
+}
+
+// 第 n 波、某 AI 档位的敌人该带什么。纯函数（同 (n,tier,lasersAlive) 恒等，无随机）——
+// 确定性是刻意的：玩家能学会「第 21 波起场上有一把激光」，而不是每辆车随机开盲盒。
+// 哪辆车带什么由头顶图标当场告知（渲染读活体状态）。
+//   lasersAlive 投放这一刻场上已上膛的激光兵数（走 countArmedLasers 数），用于配额判定
+export function eliteSpec(n, tier = "normal", lasersAlive = 0) {
   const step = eliteStep(n);
   const creep = eliteCreep(n);
   const shield = step >= 1 && ENEMY_TRAIT.shieldTiers.includes(tier);
   // 带盾的档第 2 档才拿武器，不带盾的档第 1 档就拿（补偿它永远没有盾）
   const weaponFrom = ENEMY_TRAIT.shieldTiers.includes(tier) ? 2 : 1;
   let weapon = step >= weaponFrom ? "scatter" : null;
-  if (step >= ENEMY_TRAIT.stepCap && ENEMY_TRAIT.laserTiers.includes(tier)) weapon = "laser";
+  // 激光按同屏配额发：配额未满时这一辆拿激光，配额已满的同档友军退回加量散射。
+  // laserCapAt 在 laserFrom 之前恒 0，所以这一行同时是档位门，不必再判 step
+  if (ENEMY_TRAIT.laserTiers.includes(tier) && lasersAlive < laserCapAt(step)) weapon = "laser";
   return {
     step,
     shield,
