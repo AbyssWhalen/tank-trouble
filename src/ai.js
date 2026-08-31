@@ -219,7 +219,11 @@ export function pickDodgeHeading(self, bullets, walls, horizon, hazards = []) {
 // 同格或不可达返回 []。迷宫生成时已保证全连通，不可达只是兜底。
 // blocked（可选）：禁行格 Set（"c,r" 键，目前是有雷的格）——绕开走；
 // 目标格被禁会判不可达，上层拿到 [] 走直怼兜底（有直线避雷检查兜着）。
-function findPath(maze, from, to, blocked) {
+//
+// **导出的是这条纯栅格最短路，不含任何 AI 决策**（目标格由调用方给）。
+// 出口开在这里是为了让 `scripts/arena.mjs` 的 `--holdseek` 寻点层复用同一份寻路，
+// 而不是在 harness 里抄第二份 BFS——同一个理由让 arena 用真实 `Tank` 类。
+export function findPath(maze, from, to, blocked) {
   if (from.c === to.c && from.r === to.r) return [];
 
   const { cols, rows, cells } = maze;

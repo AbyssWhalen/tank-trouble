@@ -48,11 +48,14 @@ import {
   loadChallengeProgress, saveChallengeProgress,
   loadWaveBest, saveWaveBest,
 } from "./settings.js";
-import { LEVELS, LEVEL_COUNT, evaluateObjective, normalizeProgress } from "./levels.js";
+import { LEVELS, LEVEL_COUNT, evaluateObjective, objectiveOf, normalizeProgress } from "./levels.js";
+import { evaluate } from "./objectives.js";
 import {
   waveSpec, pickEnemyLevel, shouldRemap, pickSpawnSpot,
   normalizeWaveBest, isBetterRecord, eliteSpec, applyElite, countArmedLasers,
+  waveObjective,
 } from "./waves.js";
+import { pickZoneSpot, HoldZone } from "./zone.js";
 import {
   pickOffers, applyUpgrade, fieldCapOf, supplyCountOf,
 } from "./upgrades.js";
@@ -145,6 +148,10 @@ let waveQuotaLeft = 0;         // 本波还没投放的敌人数（投放即减�
 let waveGapTimer = 0;          // 波间空场喘息（秒）：不冻结，玩家可趁机捡补给/占位
 let waveBest = normalizeWaveBest(loadWaveBest()); // 历史最高 { wave, kills }
 let waveNewRecord = false;     // 本次是否破纪录（结算横幅提示用）
+// 本波的过波条件（阶段 27）：普通波 clearQuota、守点波 hold。**只在 beginWave
+// 里赋值一次**——「这是什么波」的决策点只有一处，updateWaveFlow 只负责判它。
+let waveGoal = { type: "clearQuota" };
+let holdZone = null;           // 守点波的区域实体（普通波恒为 null）
 // 波间强化抽卡（阶段 25）。**不新增 STATE**：抽卡发生在 PLAYING 内部（底下要照常
 // 画竞技场），也不动波次调度器自己那套 waveNo/waveQuotaLeft/waveGapTimer——走
 // rebind/levelSelect/settingsPanel 那套「模块级浮层对象 + 早退门」的既有范式。
@@ -161,6 +168,9 @@ const wallBreakActive = () => (currentMode === "challenge" ? levelWallBreak : wa
 // 单人模式（挑战/波次）：players 长度可变、战绩口径与 1v1 不同 →
 // 不进终身统计（stats.players 定长 2，第三车会越界），慢镜只在终局（见 pendingSoloSlowmo）
 const soloMode = () => currentMode === "challenge" || currentMode === "wave";
+// 本关的限时/生存秒数上限（0 = 不限时的歼灭关）。HUD 读它算剩余秒数——
+// 秒数字段的解析只在 objectiveOf 一处，别在 HUD 里再拆 mutators
+const challengeSecs = () => objectiveOf(LEVELS[currentLevelIndex]).secs ?? 0;
 let showHelp = false;          // 玩法说明浮窗是否显示（叠在菜单上的浮层）
 
 // —— 键位设置面板状态（菜单子状态）——
@@ -197,15 +207,32 @@ window.__devHook = {
   introLeft: () => introTimer,
   slowmoLeft: () => slowmoTimer,
   statsSnapshot: () => JSON.parse(JSON.stringify(getStats())),
-  levelState: () => ({ index: currentLevelIndex, progress: challengeProgress, outcome: levelOutcome, timer: levelTimer }),
+  levelState: () => ({
+    index: currentLevelIndex, progress: challengeProgress, outcome: levelOutcome,
+    // elapsed 是已过秒数（阶段 27 起单一语义），left 是 HUD 显示的剩余（歼灭关为 null）
+    elapsed: levelTimer, left: challengeSecs() > 0 ? Math.max(0, challengeSecs() - levelTimer) : null,
+  }),
   forceUnlock: (n) => { challengeProgress = normalizeProgress(n); saveChallengeProgress(challengeProgress); },
   winLevel: () => { for (const p of players.slice(1)) p.tank.alive = false; }, // 歼灭关直接过（波次清场同用）
   waveState: () => ({
     wave: waveNo, kills: waveKills, quotaLeft: waveQuotaLeft,
     enemies: players.length - 1, gap: waveGapTimer, best: { ...waveBest }, newRecord: waveNewRecord,
+    goal: waveGoal.type,
   }),
   // 快进到第 n 波（跳过前面的慢热，专测换图/large 档/同屏上限）
   forceWave: (n) => { if (currentMode === "wave") beginWave(Math.max(1, n | 0)); },
+  // 阶段 27 守点波：holdState 是圈的唯一窥视口（进度靠截图读不准，扇形只有角度）；
+  // forceHoldProgress 用来快进过波流转（守满 12s 才验一次抽卡太慢），
+  // **写的是 progress 不是 done**——过波仍由 updateWaveFlow 的判据自己跑出来，
+  // 免得测出来的是「我直接把过波按下去了」这种假观测
+  holdState: () => (holdZone ? {
+    x: holdZone.x, y: holdZone.y, radius: holdZone.radius,
+    progress: holdZone.progress, need: holdZone.need, ratio: holdZone.ratio,
+    inside: holdZone.inside, done: holdZone.done,
+  } : null),
+  forceHoldProgress: (s) => {
+    if (holdZone) holdZone.progress = Math.max(0, Math.min(holdZone.need, Number(s) || 0));
+  },
   // 阶段 25 抽卡与强化：draftState 只读浮层、forceDraft 不清场直接弹（免得为测一张卡
   // 先打完一波）、pickDraft 走的是与点击/数字键完全同一条 applyDraftPick，
   // modsOf 是数值挂点的唯一窥视口（玩家侧强化与敌方侧词条读同一个字段集）
@@ -304,8 +331,7 @@ function setupRound(mode) {
     if (pc.shield) pt.applyPowerup("shield");
     spawner = new PowerupSpawner([...level.powerups]);
     levelWallBreak = !!level.wallBreak; // 关卡覆写，不动全局设置
-    // 关卡计时：survive 从 0 数上去；eliminateTimed 从上限倒数；其余不用
-    levelTimer = level.objective === "eliminateTimed" ? level.mutators.timeLimit : 0;
+    levelTimer = 0; // 本关已过秒数（单调递增，所有目标类型同一语义）
   } else if (mode === "wave") {
     // 波次生存：玩家一人 tl 起手，敌人一个都不预生成——全部交给波次调度按
     // 同屏上限逐个投放（见 updateWaveFlow），压力才是渐进的而不是开场一锅端。
@@ -338,6 +364,7 @@ function setupRound(mode) {
   effects = [];
   powerups = [];
   mines = [];
+  holdZone = null;   // 上一次波次 run 的圈不许漏进新一局（beginWave 随后会按波号重建）
   winner = null;
   pendingSoloSlowmo = false;
   // 波次第 1 波必须等实体数组清空后再起（开波补给要 push 进新的 powerups）
@@ -784,20 +811,27 @@ function updatePlaying(dt) {
 
   // 7) 胜负判定
   if (currentMode === "wave") {
+    // 守点进度（阶段 27）：**挂在物理段末尾**自动获得正确语义——抽卡浮层 /
+    // Esc 暂停 / 3-2-1 冻结这三道门都在 updatePlaying 顶部整段早退，走不到这里，
+    // 于是「浮层与冻结期间进度不涨」不需要任何额外判断。
+    // 必须排在 updateWaveFlow 之前：同帧守满就同帧过波，不欠玩家一帧。
+    // 传坦克本体（它自带 alive；死后不再计账，收场由 updateWaveFlow 段①管）。
+    if (holdZone) holdZone.update(dt, players[0].tank);
     updateWaveFlow(dt);
     return;
   }
 
   if (currentMode === "challenge") {
     // 关卡模式：目标判定（1v2 下「存活≤1」语义错误——玩家死后 AI 会互殴）。
-    // 关卡计时推进：survive 累加、eliminateTimed 倒数（用游戏时间，慢镜时同步慢——公平）
+    // levelTimer 是纯粹的「本关已过秒数」，单调递增：limit/surviveTime 的比较
+    // 在 objectives.js 里做（阶段 27 前这里按目标类型分流，一个变量两种语义）。
+    // 用游戏时间累加而不是墙钟——慢镜时同步慢，对玩家公平
     const level = LEVELS[currentLevelIndex];
-    if (level.objective === "survive") levelTimer += dt;
-    else if (level.objective === "eliminateTimed") levelTimer = Math.max(0, levelTimer - dt);
+    levelTimer += dt;
     const outcome = evaluateObjective(level, {
       playerAlive: players[0].alive,
       enemiesAlive: players.filter((p, i) => i > 0 && p.alive).length,
-      levelTimer,
+      elapsed: levelTimer,
     });
     if (pendingSoloSlowmo) {
       if (outcome) slowmoTimer = SLOWMO.duration; // 终局击杀才慢镜
@@ -957,13 +991,24 @@ function updateLevelOver(dt) {
 
 // 进入第 n 波：置配额 + 章节边界换图 + 开波强制补给。
 // 敌人不在这里一锅端投放——由 updateWaveFlow 按同屏上限逐辆补，压力才是渐进的。
+// **「这是什么波」的唯一决策点**（守点波的建立也在这里）：三个调用点
+// （setupRound / 喘息结束 / devHook.forceWave）因此全部自动正确，别在调用点各写一遍。
 function beginWave(n) {
   waveNo = n;
   const spec = waveSpec(n);
-  waveQuotaLeft = spec.quota;
+  waveGoal = waveObjective(n);
+  // 守点波（阶段 27）：配额 = Infinity（压力不停，敌人永远补），过波只看守点进度。
+  // Infinity−1 仍是 Infinity 且 Infinity<=0 为假，所以既有的投放门与 clearQuota
+  // 判据天然生效，一行分支都不用加。
+  waveQuotaLeft = waveGoal.type === "hold" ? Infinity : spec.quota;
   waveGapTimer = 0;
   if (shouldRemap(n)) remapWaveArena();   // 章节换图（内含 3-2-1 冻结）
   else if (n > 1) playSfx("countTick");   // 新一波来袭的轻提示
+  // 圈必须在换图之后挑（remapWaveArena 会换一张新图、还可能换档位），否则
+  // 旧坐标落到新图的墙里或图外。普通波恒清 null——不清就会把上一波的圈留在场上。
+  holdZone = waveGoal.type === "hold"
+    ? makeHoldZone(waveGoal.secs)
+    : null;
   // 开波补给：强制刷 supplyCountOf 个（基础 spec.supply + 「补给增量」卡的层数）。
   // **场上上限必须一起抬**（spawner.cap）——不然多刷的补给会被 forceSpawn 的
   // 「场上已满」那道门静默吃掉，那张卡就是一张空卡。算式与 arena 共用同一份出口。
@@ -972,6 +1017,13 @@ function beginWave(n) {
   const tanks = players.filter((p) => p.alive).map((p) => p.tank);
   const supply = supplyCountOf(spec, mods);
   for (let i = 0; i < supply; i++) spawner.forceSpawn(maze, powerups, tanks);
+}
+
+// 在当前地图上挑一个守点区域（选点纯函数在 zone.js）。挑不出来返回 null——
+// 那会让这一波永远过不去，但比让圈落在墙里好；实测 3×3 图都挑得出来（smoke 有断言）。
+function makeHoldZone(secs) {
+  const spot = pickZoneSpot(maze, players[0].tank);
+  return spot ? new HoldZone(spot.x, spot.y, secs) : null;
 }
 
 // 章节换图（每 WAVE.remapEvery 波，且只在空场的波次边界发生）：
@@ -991,6 +1043,12 @@ function remapWaveArena() {
   mines = [];
   introTimer = ROUND_INTRO.beat * 3;
   goTimer = 0;
+  // 圈的坐标绑在**这一张图**上（新图可能是另一个档位：large 13×8 vs medium 9×7），
+  // 旧坐标留着就可能落在墙里或图外。正常流程里守点波落在章尾、换图发生在下一波
+  // 开头，所以 remap 时 holdZone 已经是 null；但 devHook 空降与将来的节奏改动会
+  // 踩到，照「双数据源原子同步」的先例在这里显式处理：有圈就重挑（进度不带走
+  // ——图都换了，攒在旧图某个角落的秒数没有意义），没圈就保持 null。
+  if (holdZone) holdZone = makeHoldZone(holdZone.need);
 }
 
 // 投放一辆敌人：颜色槽位取当前空闲的 1..3（0 号是玩家的青绿，所以同屏上限 3），
@@ -1013,7 +1071,21 @@ function spawnWaveEnemy(spec) {
   waveQuotaLeft--;
 }
 
-// 每帧波次调度（updatePlaying 段 7 的 wave 分支，早退不落到 pvp 结算）
+// 本波的判定 ctx（喂 objectives.evaluate）。**刻意不给 elapsed**——波次的两个
+// 条件（clearQuota / hold）都不读它，加一个没人读的计时器只会让人以为波次有时限。
+const waveCtx = (enemiesAlive) => ({
+  playerAlive: players[0].alive,
+  enemiesAlive,
+  quotaLeft: waveQuotaLeft,
+  holdSecs: holdZone ? holdZone.progress : 0,
+});
+
+// 每帧波次调度（updatePlaying 段 7 的 wave 分支，早退不落到 pvp 结算）。
+// 五步顺序是承重的，别重排：
+//   ① 死亡检查（早退）—— 与 objectives.evaluate 第一行「玩家死优先」是同一条规则
+//      的两处体现：这里还要做写盘/慢镜/状态切换这些 evaluate 不表达的副作用
+//   ② 清 pendingSoloSlowmo  ③ 喘息分支（必须在④之前，否则 roundWin 与抽卡每帧重触发）
+//   ④ 过波判定（走 evaluate）  ⑤ 投放
 function updateWaveFlow(dt) {
   // 玩家死 = 本次生存结束（场上还剩几辆敌人不再关心）
   if (!players[0].alive) {
@@ -1041,8 +1113,21 @@ function updateWaveFlow(dt) {
     if (waveGapTimer === 0) beginWave(waveNo + 1);
     return;
   }
-  if (waveQuotaLeft <= 0 && enemiesAlive === 0) {
+  if (evaluate(waveGoal, waveCtx(enemiesAlive)) === "win") {
     playSfx("roundWin");
+    // **过波即清场**（阶段 27）。普通波要 enemiesAlive===0 才判过，所以这段在普通波
+    // 恒是空操作；守点波却可能在场上还有 3 辆的时候达成——残敌必须清掉，否则：
+    //   ① 「喘息是空场」这条全局不变量破了（remapWaveArena 的注释写的就是「换图在
+    //      空场边界」），而 HUD 那 1.5s 已经在写「清空」；
+    //   ② 玩家会在明明打完了第 5 波之后、被残敌在庆祝时间里打死，记录还记成第 5 波。
+    // 不计 waveKills（不是玩家打掉的）、不走 hitPlayer（那条路会牵动统计与慢镜），
+    // 只留爆炸与震动当过波的收尾反馈——守满的那一刻圈本身不加特效，反馈全在这里。
+    for (const p of players.slice(1)) {
+      p.tank.alive = false;
+      effects.push(new TankExplosion(p.tank.x, p.tank.y, p.color));
+    }
+    if (players.length > 1) addShake(5, 0.3);
+    players = [players[0]];
     // 清波 → 先抽卡（冻结），选完才进喘息。无卡可抽（全满层 / 道具全关到没有
     // 一张卡满足 requires）时 openDraft 返回 false，直接进喘息，不弹空浮层。
     if (!openDraft()) waveGapTimer = WAVE.gap;
@@ -1255,6 +1340,9 @@ function renderArena() {
   ctx.lineJoin = "round";
   ctx.strokeRect(0, 0, arenaW, arenaH);
 
+  // 守点区域（阶段 27）：**地面标记层**——墙之上、道具之下，于是子弹/坦克/道具/
+  // 特效全部盖在它上面。圈是地形语义（告诉你该站哪），要是它盖住战况就本末倒置了。
+  if (holdZone) holdZone.render(ctx);
   // 道具在地上（墙之上、子弹/坦克之下，坦克碾过去盖住它）
   for (const pw of powerups) pw.render(ctx);
   // 地雷贴地（道具之上、子弹之下；坦克开过顶时盖住雷，贴近"碾在脚下"）
@@ -1290,9 +1378,9 @@ function renderArena() {
     challenge: currentMode === "challenge" ? {
       levelId: LEVELS[currentLevelIndex].id,
       enemiesAlive: players.filter((p, i) => i > 0 && p.alive).length,
-      timer: LEVELS[currentLevelIndex].objective === "survive"
-        ? Math.max(0, (LEVELS[currentLevelIndex].mutators.surviveTime ?? 0) - levelTimer)
-        : (LEVELS[currentLevelIndex].objective === "eliminateTimed" ? levelTimer : null),
+      // 限时/生存关一律显示**剩余**秒数（两者同一个式子——阶段 27 前 levelTimer
+      // 一个变量两种语义，这里得靠 objective 字符串二次分流）；歼灭关无 secs → 不显示
+      timer: challengeSecs() > 0 ? Math.max(0, challengeSecs() - levelTimer) : null,
     } : null,
     // 波次模式右侧同样走聚合显示（第 N 波/场上敌/本波剩余/击杀），与 challenge 槽同路子
     wave: currentMode === "wave" ? {
@@ -1302,6 +1390,9 @@ function renderArena() {
       kills: waveKills,
       gap: waveGapTimer,
       taken, // 左下角「已获强化」条（renderUpgradeBar 消费）
+      // 守点波（阶段 27）：hold 非空 = 这一波换规则了，HUD 要当场说清（进波第一眼
+      // 就得知道）。ui 侧凭它切模板——**守点波的 left 是 Infinity，绝不能印**。
+      hold: holdZone ? { progress: holdZone.progress, need: holdZone.need, inside: holdZone.inside } : null,
     } : null,
   });
 }

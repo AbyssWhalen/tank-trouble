@@ -698,6 +698,132 @@ section("地图生成 (generateMaze 三风格)");
 }
 
 // ============================================================
+section("胜负条件 (objectives)");
+{
+  const { OBJECTIVES, evaluate } = await import("../src/objectives.js");
+  const { LEVELS: LVS, evaluateObjective: evalObj, objectiveOf } = await import("../src/levels.js");
+
+  // 通用 ctx 骨架：每条断言只覆盖自己关心的字段
+  const base = { playerAlive: true, enemiesAlive: 1, quotaLeft: 0, elapsed: 0, holdSecs: 0 };
+  const ev = (obj, over) => evaluate(obj, { ...base, ...over });
+
+  {
+    check("五型齐备且无多余型",
+      Object.keys(OBJECTIVES).sort().join(",") === "clearQuota,eliminate,eliminateTimed,hold,survive",
+      Object.keys(OBJECTIVES).join("/"));
+  }
+  {
+    const o = { type: "eliminate" };
+    check("eliminate 真值表",
+      ev(o, { enemiesAlive: 0 }) === "win" &&
+      ev(o, { enemiesAlive: 1 }) === null &&
+      ev(o, { enemiesAlive: 3 }) === null);
+  }
+  {
+    const o = { type: "survive", secs: 45 };
+    check("survive 真值表（清场提前过关 + 恰好到点算赢）",
+      ev(o, { elapsed: 44.99 }) === null &&
+      ev(o, { elapsed: 45 }) === "win" &&
+      ev(o, { elapsed: 60 }) === "win" &&
+      ev(o, { enemiesAlive: 0, elapsed: 1 }) === "win");
+  }
+  {
+    const o = { type: "eliminateTimed", secs: 120 };
+    check("eliminateTimed 真值表（清场优先于超时）",
+      ev(o, { elapsed: 119.99 }) === null &&
+      ev(o, { elapsed: 120 }) === "lose" &&
+      ev(o, { enemiesAlive: 0, elapsed: 999 }) === "win");
+  }
+  {
+    const o = { type: "clearQuota" };
+    check("clearQuota 真值表（配额清零但场上有敌不算过）",
+      ev(o, { quotaLeft: 0, enemiesAlive: 0 }) === "win" &&
+      ev(o, { quotaLeft: 0, enemiesAlive: 1 }) === null &&
+      ev(o, { quotaLeft: 3, enemiesAlive: 0 }) === null &&
+      ev(o, { quotaLeft: Infinity, enemiesAlive: 0 }) === null); // 守点波的无限配额
+  }
+  {
+    const o = { type: "hold", secs: 12 };
+    check("hold 真值表（差 0.01 秒不算过，且无失败态）",
+      ev(o, { holdSecs: 11.99 }) === null &&
+      ev(o, { holdSecs: 12 }) === "win" &&
+      ev(o, { holdSecs: 12.5 }) === "win" &&
+      ev(o, { holdSecs: 0, elapsed: 9999, enemiesAlive: 3 }) === null); // 熬多久都不判负
+  }
+  {
+    // 红线：玩家死优先于任何达成——五型 × 各自「本该赢」的 ctx 必须全部 lose。
+    // 同时反向确认那些 ctx 在活着时**真的**是 win（否则这条会因为写错 ctx 而空过）
+    const wins = [
+      [{ type: "eliminate" }, { enemiesAlive: 0 }],
+      [{ type: "survive", secs: 45 }, { elapsed: 99 }],
+      [{ type: "eliminateTimed", secs: 120 }, { enemiesAlive: 0 }],
+      [{ type: "clearQuota" }, { quotaLeft: 0, enemiesAlive: 0 }],
+      [{ type: "hold", secs: 12 }, { holdSecs: 99 }],
+    ];
+    check("玩家死优先于达成（五型全覆盖）",
+      wins.length === Object.keys(OBJECTIVES).length &&
+      wins.every(([o, over]) => ev(o, { ...over, playerAlive: false }) === "lose") &&
+      wins.every(([o, over]) => ev(o, over) === "win"),
+      `${wins.length} 型`);
+  }
+  {
+    check("坏输入不抛：未知型退化 eliminate / 空 ctx 判负 / 缺 secs 不白送",
+      ev({ type: "nope" }, { enemiesAlive: 0 }) === "win" &&
+      ev({ type: "nope" }, { enemiesAlive: 1 }) === null &&
+      ev(undefined, { enemiesAlive: 0 }) === "win" &&
+      ev({}, { enemiesAlive: 0 }) === "win" &&
+      evaluate({ type: "eliminate" }, null) === "lose" &&
+      evaluate({ type: "eliminate" }, undefined) === "lose" &&
+      // 缺 secs 的计时型：宁可继续跑，不白送一个 win 也不白判一个 lose
+      ev({ type: "survive" }, { elapsed: 1e9 }) === null &&
+      ev({ type: "eliminateTimed" }, { elapsed: 1e9 }) === null &&
+      ev({ type: "hold" }, { holdSecs: 1e9 }) === null &&
+      ev({ type: "survive", secs: "45" }, { elapsed: 1e9 }) === null);
+  }
+  {
+    // 桥接封闭性：8 关翻出来的 type 必须都在表里（关卡表加新目标时这条先红）
+    const mapped = LVS.map((l) => objectiveOf(l).type);
+    const secsOk = LVS.every((l) => {
+      const o = objectiveOf(l);
+      return o.type === "eliminate" ? o.secs === undefined : o.secs > 0;
+    });
+    check("关卡表 → objectives 映射封闭且秒数齐备",
+      mapped.every((t) => t in OBJECTIVES) && secsOk, [...new Set(mapped)].join("/"));
+  }
+  {
+    // 等价护栏（钉住阶段 27 的重构本身）：8 关 × ctx 网格跑薄壳化后的
+    // evaluateObjective，与照旧 switch 手写的参照实现逐格比对。这条一红说明
+    // **重构改了语义**，与「新功能没做完」是两种不同的失败，必须能分开。
+    const ref = (level, c) => {
+      if (!c.playerAlive) return "lose";
+      const m = level.mutators || {};
+      if (level.objective === "survive") {
+        if (c.enemiesAlive === 0) return "win";
+        return c.elapsed >= (m.surviveTime ?? 60) ? "win" : null;
+      }
+      if (level.objective === "eliminateTimed") {
+        if (c.enemiesAlive === 0) return "win";
+        return c.elapsed >= (m.timeLimit ?? 120) ? "lose" : null;
+      }
+      return c.enemiesAlive === 0 ? "win" : null;
+    };
+    let cases = 0, bad = null;
+    for (const level of LVS) {
+      const secs = objectiveOf(level).secs ?? 60;
+      for (const playerAlive of [true, false])
+        for (const enemiesAlive of [0, 1, 2])
+          for (const elapsed of [0, secs - 0.1, secs, secs + 5]) {
+            const c = { playerAlive, enemiesAlive, elapsed };
+            cases++;
+            const got = evalObj(level, c), want = ref(level, c);
+            if (got !== want && !bad) bad = `第 ${level.id} 关 ${JSON.stringify(c)} → ${got} ≠ ${want}`;
+          }
+    }
+    check("等价护栏：8 关 × ctx 网格与参照实现逐格全等", !bad, bad || `${cases} 格`);
+  }
+}
+
+// ============================================================
 section("关卡表与过关判定 (levels)");
 {
   const { LEVELS, LEVEL_COUNT, evaluateObjective, normalizeProgress } = await import("../src/levels.js");
@@ -720,25 +846,28 @@ section("关卡表与过关判定 (levels)");
   {
     const elim = { objective: "eliminate", mutators: {} };
     check("歼灭关真值表",
-      evaluateObjective(elim, { playerAlive: true, enemiesAlive: 0, levelTimer: 0 }) === "win" &&
-      evaluateObjective(elim, { playerAlive: true, enemiesAlive: 1, levelTimer: 0 }) === null &&
-      evaluateObjective(elim, { playerAlive: false, enemiesAlive: 1, levelTimer: 0 }) === "lose" &&
-      evaluateObjective(elim, { playerAlive: false, enemiesAlive: 0, levelTimer: 0 }) === "lose"); // 同归=败
+      evaluateObjective(elim, { playerAlive: true, enemiesAlive: 0, elapsed: 0 }) === "win" &&
+      evaluateObjective(elim, { playerAlive: true, enemiesAlive: 1, elapsed: 0 }) === null &&
+      evaluateObjective(elim, { playerAlive: false, enemiesAlive: 1, elapsed: 0 }) === "lose" &&
+      evaluateObjective(elim, { playerAlive: false, enemiesAlive: 0, elapsed: 0 }) === "lose"); // 同归=败
   }
   {
     const surv = { objective: "survive", mutators: { surviveTime: 45 } };
     check("生存关真值表（含歼灭提前过关）",
-      evaluateObjective(surv, { playerAlive: true, enemiesAlive: 1, levelTimer: 44 }) === null &&
-      evaluateObjective(surv, { playerAlive: true, enemiesAlive: 1, levelTimer: 45 }) === "win" &&
-      evaluateObjective(surv, { playerAlive: true, enemiesAlive: 0, levelTimer: 10 }) === "win" &&
-      evaluateObjective(surv, { playerAlive: false, enemiesAlive: 1, levelTimer: 50 }) === "lose");
+      evaluateObjective(surv, { playerAlive: true, enemiesAlive: 1, elapsed: 44 }) === null &&
+      evaluateObjective(surv, { playerAlive: true, enemiesAlive: 1, elapsed: 45 }) === "win" &&
+      evaluateObjective(surv, { playerAlive: true, enemiesAlive: 0, elapsed: 10 }) === "win" &&
+      evaluateObjective(surv, { playerAlive: false, enemiesAlive: 1, elapsed: 50 }) === "lose");
   }
   {
+    // 注意 elapsed 是**已过**秒数（阶段 27 起单一语义）：超时 = elapsed 追上上限，
+    // 不再是「倒计时归零」
     const timed = { objective: "eliminateTimed", mutators: { timeLimit: 90 } };
     check("限时歼灭关真值表",
-      evaluateObjective(timed, { playerAlive: true, enemiesAlive: 0, levelTimer: 10 }) === "win" &&
-      evaluateObjective(timed, { playerAlive: true, enemiesAlive: 1, levelTimer: 10 }) === null &&
-      evaluateObjective(timed, { playerAlive: true, enemiesAlive: 1, levelTimer: 0 }) === "lose");
+      evaluateObjective(timed, { playerAlive: true, enemiesAlive: 0, elapsed: 10 }) === "win" &&
+      evaluateObjective(timed, { playerAlive: true, enemiesAlive: 1, elapsed: 10 }) === null &&
+      evaluateObjective(timed, { playerAlive: true, enemiesAlive: 1, elapsed: 89.9 }) === null &&
+      evaluateObjective(timed, { playerAlive: true, enemiesAlive: 1, elapsed: 90 }) === "lose");
   }
   {
     check("进度宽松校验",
@@ -888,6 +1017,165 @@ section("波次曲线 (waves)");
     }
     const spot = pickSpawnSpot(mz, all[0], all, () => 0);
     check("全图被占时返回 null 而不是墙里的点", spot === null);
+  }
+}
+
+// ============================================================
+section("守点区域 (zone/hold)");
+{
+  const { isHoldWave, holdNeed, waveObjective, waveSpec, shouldRemap } = await import("../src/waves.js");
+  const { pickZoneSpot, HoldZone } = await import("../src/zone.js");
+  const { HOLD, WAVE } = await import("../src/config.js");
+  const { OBJECTIVES } = await import("../src/objectives.js");
+
+  const holdWaves = [];
+  for (let n = 1; n <= 40; n++) if (isHoldWave(n)) holdWaves.push(n);
+
+  {
+    // 相位：从 HOLD 常量推期望集合（改旋钮时断言跟着走），再单独钉住出厂节奏
+    const expect = [];
+    for (let n = 1; n <= 40; n++) if (n >= HOLD.from && (n - HOLD.from) % HOLD.every === 0) expect.push(n);
+    const notHold = [1, 2, 3, 4, 6, 7, 8, 9, 11, 31].every((n) => !isHoldWave(n));
+    check("守点波相位与 HOLD 常量一致，非守点波为假",
+      holdWaves.join(",") === expect.join(",") && notHold, `hold: ${holdWaves.join("/")}`);
+    check("出厂节奏恰好是 5/10/15/20/25/30",
+      holdWaves.slice(0, 6).join("/") === "5/10/15/20/25/30");
+    check("非整数/非法波号不误判", !isHoldWave(4.9) && isHoldWave(5.4) && !isHoldWave(0) && !isHoldWave(-5));
+  }
+  {
+    // 承重不变量：守点波恒落在章尾 → 守住过关 → 抽卡 → 下一波换图进新章
+    const atTail = holdWaves.every((n) => shouldRemap(n + 1));
+    check("守点波恒落在章尾（下一波必换图）", atTail && HOLD.every === WAVE.remapEvery,
+      `every=${HOLD.every} remapEvery=${WAVE.remapEvery}`);
+  }
+  {
+    const needs = holdWaves.map((n) => holdNeed(n));
+    const mono = needs.every((v, i) => i === 0 || v >= needs[i - 1]);
+    const capped = needs.every((v) => v <= HOLD.needCap);
+    const zeroed = [1, 4, 6, 11, 31].every((n) => holdNeed(n) === 0);
+    check("守点秒数单调不减、钳在 needCap、非守点波为 0",
+      mono && capped && zeroed && holdNeed(HOLD.from) === HOLD.needBase,
+      `needs: ${needs.join("/")} cap ${HOLD.needCap}`);
+    check("秒数按「第几个守点波」算而不是按波号",
+      holdNeed(HOLD.from + HOLD.every) === HOLD.needBase + HOLD.needStep);
+  }
+  {
+    const typeOk = [];
+    for (let n = 1; n <= 40; n++) {
+      const o = waveObjective(n);
+      typeOk.push(o.type === (isHoldWave(n) ? "hold" : "clearQuota"));
+      if (o.type === "hold" && o.secs !== holdNeed(n)) typeOk.push(false);
+      if (o.type === "clearQuota" && "secs" in o) typeOk.push(false);
+    }
+    const inTable = [...new Set([1, 5, 10].map((n) => waveObjective(n).type))].every((t) => t in OBJECTIVES);
+    check("waveObjective 与相位/秒数一致且类型在 OBJECTIVES 表内",
+      typeOk.every(Boolean) && inTable);
+  }
+  {
+    // 结构护栏（照 neutralMods 那条的范式）：守点字段不许塞进 waveSpec 的返回值。
+    // 「这一波什么规格」与「这一波什么规则」是两个出口，搅在一起以后必然有人只改一处
+    const FROZEN = ["wave", "quota", "concurrent", "mix", "tier", "supply"].sort().join(",");
+    const keysOk = [1, 5, 10, 16, 31].every((n) => Object.keys(waveSpec(n)).sort().join(",") === FROZEN);
+    check("waveSpec 键集合逐字不变（守点走独立出口）", keysOk,
+      `keys=${Object.keys(waveSpec(10)).sort().join(",")}`);
+  }
+  {
+    // 选点：3 风格 × 3 档 × 30 张图。玩家在左上角时严格落在 [minCells, maxCells]
+    const tiers = ["small", "medium", "large"];
+    let nullCount = 0, wallBad = 0, bandBad = 0, total = 0;
+    for (let t = 0; t < 30; t++) {
+      for (const tier of tiers) {
+        const { cols, rows } = MAZE_TIERS[tier];
+        const mz = generateMaze(cols, rows, ["sparse", "symmetric", "rooms"][t % 3]);
+        const hero = { x: CELL_SIZE * 0.5, y: CELL_SIZE * 0.5 };
+        const spot = pickZoneSpot(mz, hero, () => 0.5);
+        total++;
+        if (!spot) { nullCount++; continue; }
+        const fixed = resolveCircleWalls(spot.x, spot.y, TANK.radius, mz.walls);
+        if (Math.hypot(fixed.x - spot.x, fixed.y - spot.y) > 0.5) wallBad++;
+        const d = Math.hypot(spot.x - hero.x, spot.y - hero.y) / CELL_SIZE;
+        if (d < HOLD.minCells - 1e-9 || d > HOLD.maxCells + 1e-9) bandBad++;
+      }
+    }
+    check("选点永不 null、不嵌墙、严格落在距离区间",
+      nullCount === 0 && wallBad === 0 && bandBad === 0,
+      `${total} 图 null=${nullCount} 嵌墙=${wallBad} 越界=${bandBad}`);
+  }
+  {
+    // 玩家站图心的小图：严格区间可能空 → 放宽档生效，但仍不许贴脸、不许嵌墙
+    const { cols, rows } = MAZE_TIERS.small;
+    let ok = true;
+    for (let t = 0; t < 20; t++) {
+      const mz = generateMaze(cols, rows, ["sparse", "symmetric", "rooms"][t % 3]);
+      const hero = { x: (cols / 2) * CELL_SIZE, y: (rows / 2) * CELL_SIZE };
+      const spot = pickZoneSpot(mz, hero, () => 0.9);
+      if (!spot) { ok = false; continue; }
+      const d = Math.hypot(spot.x - hero.x, spot.y - hero.y) / CELL_SIZE;
+      if (d < HOLD.minCells * 0.7 - 1e-9) ok = false;
+      const fixed = resolveCircleWalls(spot.x, spot.y, TANK.radius, mz.walls);
+      if (Math.hypot(fixed.x - spot.x, fixed.y - spot.y) > 0.5) ok = false;
+    }
+    check("玩家居中的小图：放宽后仍不贴脸不嵌墙", ok);
+  }
+  {
+    // 兜底：极小图 + 玩家在图心（严格区间与放宽档都空）也必须给出一个点
+    const mz = generateMaze(3, 3, "sparse");
+    const spot = pickZoneSpot(mz, { x: CELL_SIZE * 1.5, y: CELL_SIZE * 1.5 }, () => 0);
+    check("3×3 极小图也不返回 null（圈是唯一过波途径，null = 死局）", !!spot);
+  }
+  {
+    const mz = generateMaze(MAZE_TIERS.medium.cols, MAZE_TIERS.medium.rows, "sparse");
+    const hero = { x: CELL_SIZE * 0.5, y: CELL_SIZE * 0.5 };
+    const a = pickZoneSpot(mz, hero, () => 0.31);
+    const b = pickZoneSpot(mz, hero, () => 0.31);
+    check("选点确定性（同 rand 同解）", a.x === b.x && a.y === b.y);
+  }
+  {
+    const z = new HoldZone(500, 500, 12);
+    const r = z.radius;
+    check("圈半径按 HOLD.radius 换算，按车心判定",
+      Math.abs(r - HOLD.radius * CELL_SIZE) < 1e-9 &&
+      z.contains(500, 500) && z.contains(500 + r - 1, 500) && !z.contains(500 + r + 1, 500));
+  }
+  {
+    const z = new HoldZone(0, 0, 3);
+    const inHero = { x: 0, y: 0, alive: true };
+    for (let i = 0; i < 10; i++) z.update(1 / 60, inHero);
+    const after = z.progress;
+    check("圈内累计（10 帧 ≈ 0.167s）且 inside 为真",
+      near(after, 10 / 60, 1e-6) && z.inside === true, `progress=${after.toFixed(4)}`);
+    // 出圈冻结：多帧 update 后逐位不变（不是「衰减很慢」，是一点不动）
+    const outHero = { x: 9999, y: 0, alive: true };
+    for (let i = 0; i < 30; i++) z.update(1 / 60, outHero);
+    check("出圈冻结不衰减（30 帧后 progress 逐位不变）",
+      z.progress === after && z.inside === false);
+  }
+  {
+    const z = new HoldZone(0, 0, 2);
+    const hero = { x: 0, y: 0, alive: true };
+    check("未守满时 done 为假、ratio 在 [0,1]", !z.done && z.ratio === 0);
+    for (let i = 0; i < 60; i++) z.update(1 / 30, hero);   // 2s 需求，喂 2s
+    check("恰好守满即 done，progress 钳在 need 不越界",
+      z.done && z.progress === 2 && z.ratio === 1);
+    for (let i = 0; i < 60; i++) z.update(1 / 30, hero);   // 再喂 2s
+    check("守满后继续 update 不越界", z.progress === 2 && z.ratio === 1);
+  }
+  {
+    const z = new HoldZone(0, 0, 5);
+    z.update(0.5, { x: 0, y: 0, alive: false });           // 死人不记账
+    const dead = z.progress;
+    z.update(0.5, null);                                    // 缺 hero 不抛
+    z.update(0.5, undefined);
+    check("死亡/缺失的 hero 不累计且不抛", dead === 0 && z.progress === 0 && z.inside === false);
+    const bad = new HoldZone(0, 0, -3);                     // 坏 need 退化成 0
+    check("坏 need 退化成 0 且 ratio 不 NaN", bad.need === 0 && bad.ratio === 1 && bad.done);
+  }
+  {
+    // 守点条件本身没有失败态：站在圈外挨打 9999 秒也只是「继续打」
+    const c = { playerAlive: true, enemiesAlive: 3, quotaLeft: Infinity, elapsed: 9999, holdSecs: 0 };
+    check("hold 无失败态（唯一的失败仍然是死）",
+      OBJECTIVES.hold(c, { secs: 12 }) === null &&
+      OBJECTIVES.hold({ ...c, holdSecs: 12 }, { secs: 12 }) === "win");
   }
 }
 

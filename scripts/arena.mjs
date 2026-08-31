@@ -41,13 +41,20 @@ import {
   circleVsCircle, separateCircles, resolveCircleWalls, closestPointOnSegment,
 } from "../src/collision.js";
 import {
-  CELL_SIZE, TANK, BULLET, POWERUP, MAZE_TIERS, TIER_POOL_BY_MODE, STYLE_POOL_BY_MODE, WAVE,
+  CELL_SIZE, TANK, BULLET, POWERUP, MAZE_TIERS, TIER_POOL_BY_MODE, STYLE_POOL_BY_MODE, WAVE, HOLD,
   UPGRADE,
 } from "../src/config.js";
-import { LEVELS, evaluateObjective } from "../src/levels.js";
+import { LEVELS, evaluateObjective, objectiveOf } from "../src/levels.js";
+import { evaluate } from "../src/objectives.js";
 import {
   waveSpec, pickEnemyLevel, shouldRemap, pickSpawnSpot, eliteSpec, applyElite, countArmedLasers,
+  waveObjective, holdNeed, chapterOf,
 } from "../src/waves.js";
+import { pickZoneSpot, HoldZone } from "../src/zone.js";
+// 只借 ai.js 那条**纯栅格最短路**给 --holdseek 的寻点层用（AiController 仍走
+// loadAi 动态导入，以便 --aiA/--aiB 挂旧版模块）。findPath 不含任何 AI 决策，
+// 目标格由调用方给，所以这里静态导入当前版不会污染新旧对比。
+import { findPath } from "../src/ai.js";
 import {
   pickOffers, applyUpgrade, fieldCapOf, supplyCountOf, UPGRADES,
 } from "../src/upgrades.js";
@@ -104,6 +111,23 @@ const DRAFT = opt.draft ?? "priority";
 // 的波段。所以主实验必须空降，而空降的玩家若身上没有本该攒下的卡，测的就是一个
 // 不存在的局面。
 const PREGRANT = Math.max(0, Number(opt.pregrant ?? STARTWAVE - 1));
+
+// —— 阶段 27 的守点波（只对 --waves 生效）——
+// `--hold off` 关掉守点波（第 5/10/… 波退回普通清场波）。**这个开关是控制组的命根**：
+// 不留它，阶段 26 那条基线（`12.8/7.1/8.6/7.4/6.2/5.9/4.8/3.9`s）在守点波上线后
+// 就永久失去了可比对象。照 `--draft off` / `--elite off` 的先例。
+const HOLD_ON = opt.hold !== "off";
+// `--holdseek on` 给玩家位替身加一层**harness 层**的粗糙寻点：不在圈里就朝圈心走。
+// **绝不进 ai.js**——ai.js 只认「锁敌决斗」，让它长出区域概念是给一个玩家侧规则
+// 造 AI 能力，代价是永久多一条要维护的行为分支。默认 off，因为它会污染普通波的
+// 基线读数（普通波压根没有圈，但这条策略的存在会让人误以为读数可比）。
+//
+// **偏差声明（与第 4 关虚高、第 5 关偏低同一类失效）**：这个替身**不会边守边躲弹**
+// ——它在圈内时用的是 ai.js 的躲弹，可一出圈就被强行拉回来，等于自愿踩线。
+// 所以守点波的**通过率 arena 量不出来**，`holdCleared/holdWaves` 绝不可当人类通过率。
+// 可用的只有相对量：同参数下「中位守点进度秒数」随波次单调不增，以及改
+// needBase/needStep 前后的位移。
+const HOLDSEEK = opt.holdseek === "on";
 // priority 策略的排序表：越前越优先。按「对 AI 替身有用」排的，**不等于对人类有用**——
 // ricochet 排第一是因为替身死于自己跳弹的比例极高（见 WAVE_GAP 注释里的伪影），
 // 人类玩家远没那么频繁自杀；laserUp/mineUp 垫底是因为互搏中激光/地雷死因恒为 0。
@@ -373,21 +397,19 @@ function playLevel(level) {
   else if (pc.weapon === "mine") hero.tank.mineCharges = pc.shots ?? 2;
   if (pc.shield) hero.tank.applyPowerup("shield");
 
-  // 关卡计时：survive 从 0 数上去、eliminateTimed 从上限倒数（同 main）
-  let levelTimer = level.objective === "eliminateTimed" ? level.mutators.timeLimit : 0;
-  const budget = level.mutators.timeLimit ?? level.mutators.surviveTime ?? 0;
+  // 关卡计时：纯粹的「本关已过秒数」，单调递增（同 main）——限时/生存的秒数
+  // 上限比较在 objectives.js 里做，这里不按目标类型分流
+  let elapsed = 0;
+  const budget = objectiveOf(level).secs ?? 0;
   return simulate({
     maze, actors, types: [...level.powerups], erode: !!level.wallBreak,
     // 限时/生存关到点由 verdict 自然收场，TIMEOUT 只是歼灭关的兜底上限
     timeout: budget + TIMEOUT,
-    onFrame: (dt) => {
-      if (level.objective === "survive") levelTimer += dt;
-      else if (level.objective === "eliminateTimed") levelTimer = Math.max(0, levelTimer - dt);
-    },
+    onFrame: (dt) => { elapsed += dt; },
     verdict: () => evaluateObjective(level, {
       playerAlive: hero.alive,
       enemiesAlive: actors.filter((a, i) => i > 0 && a.alive).length,
-      levelTimer,
+      elapsed,
     }),
   });
 }
@@ -405,7 +427,7 @@ function waveStyle() {
 // 所以换图 = verdict 返回 "remap" 收场 → 建新图 → 带着同一个坦克对象重新进
 // simulate（对齐 main.remapWaveArena「保留玩家坦克，武器槽与护盾不被换图没收」）。
 // 不另写一份结算副本——结算顺序只有 simulate 这一处。
-// 返回 { wave, kills, outcome, elapsed, stuck, mix, cause, taken }。
+// 返回 { wave, kills, outcome, elapsed, stuck, mix, cause, taken, holdWaves, holdCleared, holdBest }。
 function playWaves() {
   let waveNo = 0, kills = 0, quotaLeft = 0, gapTimer = 0, elapsed = 0, stuck = 0;
   let inGap = false;      // 本波已清空，正在喘息（与 gapTimer 分开：gap 可为 0）
@@ -415,6 +437,13 @@ function playWaves() {
   const mix = { easy: 0, normal: 0, hard: 0 }; // 实际投放的档位分布（验证 mix 曲线）
   const cause = [];       // 玩家死因（子弹/激光/地雷）
   const taken = new Map();                    // 本 run 已抽的卡（id → 层数）
+  // 本波过波条件（同 main 的 waveGoal）：判定走 objectives.evaluate 那一份，
+  // 别在这里内联「配额清零 && 场上零敌」——两份结算副本必然跑偏
+  let waveGoal = { type: "clearQuota" };
+  let zone = null;        // 守点区域实体（同 main 的 holdZone；普通波恒 null）
+  // 守点读数（见 HOLDSEEK 的偏差声明：只读相对量，不当通过率）
+  let holdWaves = 0, holdCleared = 0, holdBest = 0;
+  let seekStuck = 0;      // --holdseek 的撞墙计时：卡住就交还控制权一段时间
   // 抽卡池的 requires 上下文：与实机同源（玩家启用的道具类型 + 地形开关）
   const draftCtx = { types: new Set(TYPES), wallBreak: ERODE };
 
@@ -422,7 +451,50 @@ function playWaves() {
   let dims = MAZE_TIERS[tier];
   let maze = generateMaze(dims.cols, dims.rows, waveStyle());
   const hero = mkActor("P", corners(dims.cols, dims.rows).tl);
-  hero.ctrl = new AiA(hero, PROXY);
+
+  // --holdseek 的寻点层：**包在控制器外面**，不动 ai.js 的任何决策。不在圈内时把
+  // {turn, move} 改成「朝下一个路点转 + 前进」，fire/special 始终交还 ai.js（开火
+  // 决策与区域无关）。**在圈内时完全放手**——那时躲弹归 ai.js，替身才有一点点像人。
+  //
+  // 走 ai.js 的 `findPath`（纯栅格 BFS，目标格由这里给）而**不是**朝圈心直线冲：
+  // 直线版实测在第 5 波跑出「中位守点进度 1.2s / 40 次 0 次守满」——替身压根走不到
+  // 圈里，读数量的是「撞墙」而不是「守点」，这把仪器没有分辨率。改 BFS 后才开始
+  // 量到东西。**这不是让替身变强**，它照旧不会边守边躲（偏差声明见文件头）。
+  // 撞墙卡住 0.8s 仍交还控制权 1.2s，免得贴墙抖到本波结束。
+  const wrapSeek = (inner) => {
+    if (!HOLDSEEK) return inner;
+    let lastX = hero.tank.x, lastY = hero.tank.y, yieldT = 0, replan = 0, path = [];
+    const cellAt = (x, y) => ({ c: Math.floor(x / CELL_SIZE), r: Math.floor(y / CELL_SIZE) });
+    return {
+      get unstickTimer() { return inner.unstickTimer; },   // simulate 的卡住采样读它
+      update(dt, world) {
+        const c = inner.update(dt, world);
+        const moved = Math.hypot(hero.tank.x - lastX, hero.tank.y - lastY);
+        lastX = hero.tank.x; lastY = hero.tank.y;
+        if (!zone || zone.done) return c;
+        if (yieldT > 0) { yieldT -= dt; return c; }
+        if (zone.contains(hero.tank.x, hero.tank.y)) { seekStuck = 0; path = []; return c; }
+        seekStuck = moved < TANK.speed * dt * 0.35 ? seekStuck + dt : 0;
+        if (seekStuck > 0.8) { seekStuck = 0; yieldT = 1.2; path = []; return c; }
+        // 路点：BFS 下一格心；同格/不可达就退化成朝圈心直线（圈心一定在本格里）
+        const from = cellAt(hero.tank.x, hero.tank.y);
+        replan -= dt;
+        if (replan <= 0 || !path.length) {
+          path = findPath(maze, from, cellAt(zone.x, zone.y));
+          replan = 0.4;   // 敌人在动、路会被雷/破洞改写，定期重算
+        }
+        while (path.length && path[0].c === from.c && path[0].r === from.r) path.shift();
+        const tx = path.length ? (path[0].c + 0.5) * CELL_SIZE : zone.x;
+        const ty = path.length ? (path[0].r + 0.5) * CELL_SIZE : zone.y;
+        let d = Math.atan2(ty - hero.tank.y, tx - hero.tank.x) - hero.tank.angle;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        // 朝向差过大时先转再走（倒着冲会把车推离目标）
+        return { ...c, turn: Math.abs(d) < 0.06 ? 0 : Math.sign(d), move: Math.abs(d) > 1.4 ? 0 : 1 };
+      },
+    };
+  };
+  hero.ctrl = wrapSeek(new AiA(hero, PROXY));
   const actors = [hero];  // 全程同一个数组：onFrame 原地增删，simulate 看得见
 
   // 抽一张卡（同 main 的清波抽卡）。返回卡 id，没抽（策略 off / 无可抽卡）返回 null。
@@ -444,9 +516,20 @@ function playWaves() {
   // 进入第 n 波：置配额 + 开波强制补给（同 main.beginWave，换图那半边在驱动循环里）
   const enterWave = (n, ctx) => {
     waveNo = n;
-    quotaLeft = waveSpec(n).quota;
+    // 守点波（阶段 27，同 main.beginWave）：配额 = Infinity（压力不停），
+    // 过波只看守点进度。`--hold off` 退回普通清场波做控制组。
+    waveGoal = HOLD_ON ? waveObjective(n) : { type: "clearQuota" };
+    quotaLeft = waveGoal.type === "hold" ? Infinity : waveSpec(n).quota;
+    if (waveGoal.type === "hold") {
+      const spot = pickZoneSpot(maze, hero.tank);
+      zone = spot ? new HoldZone(spot.x, spot.y, waveGoal.secs) : null;
+      holdWaves++;
+    } else {
+      zone = null;   // 普通波必须清，否则上一波的圈留在图上
+    }
     inGap = false;
     gapTimer = 0;
+    seekStuck = 0;
     // 场上道具上限跟着 supply 卡走。**必须每波重设**：simulate 一章新建一次
     // spawner，只在开局设一次的话每次换图都退回默认 cap（那 supply 卡就半张空卡）
     ctx.spawner.cap = fieldCapOf(hero.tank.mods);
@@ -458,6 +541,12 @@ function playWaves() {
   const onFrame = (dt, ctx) => {
     elapsed += dt;
     if (pendingEnter) { enterWave(pendingEnter, ctx); pendingEnter = null; }
+    // 守点进度（同 main：挂在胜负判定之前，同帧守满同帧过波）。
+    // 死了不再计账（HoldZone.update 自己认 tank.alive），收场交给 verdict。
+    if (zone) {
+      zone.update(dt, hero.tank);
+      if (zone.progress > holdBest) holdBest = zone.progress;
+    }
     if (!hero.alive) return; // 收场交给 verdict，别再调度
 
     // 死敌当帧出列（同 main 段 6.5）：enemiesAlive 才是精确值，颜色/编号也回收
@@ -490,7 +579,15 @@ function playWaves() {
       }
       return;
     }
-    if (quotaLeft <= 0 && enemiesAlive === 0) {
+    if (evaluate(waveGoal, {
+      playerAlive: hero.alive, enemiesAlive, quotaLeft,
+      holdSecs: zone ? zone.progress : 0,
+    }) === "win") {
+      if (waveGoal.type === "hold") holdCleared++;
+      // 过波即清场（同 main：守点波可能在场上还有 3 辆时达成，残敌不清就会打破
+      // 「喘息/换图都在空场边界」这条两边都依赖的不变量）。不计 kills。
+      for (const a of actors.slice(1)) a.tank.alive = false;   // actor.alive 是只读投影
+      actors.length = 1;
       draftOnce();            // 清波抽卡（同 main：抽完才进喘息）
       inGap = true;
       gapTimer = WAVE_GAP;
@@ -525,19 +622,33 @@ function playWaves() {
     return null;
   };
 
+  // 本章（下一次 simulate 覆盖的那几波）里守点波要吃掉的秒数预算。
+  // **必须加**：守点波站着耗 needSecs，而统计里「超时」与「守不住」长得一模一样，
+  // 不放宽就会把守点波的存在记成 tally.timeout 上涨。放 3 倍需求是留出走位/交战。
+  const chapterHoldSlack = () => {
+    if (!HOLD_ON) return 0;
+    const start = pendingEnter ?? waveNo;
+    let s = 0;
+    for (let n = start; n <= MAXWAVE && chapterOf(n) === chapterOf(start); n++) s += holdNeed(n) * 3;
+    return s;
+  };
+
   // 一章一次 simulate：收场值为 "remap" 就换图续跑，其余（死/封顶/超时）收工
   for (;;) {
     const res = simulate({
       maze, actors, types: TYPES, erode: ERODE,
       // 一章 5 波、后期同屏 3 辆，90s 远不够——按章给预算（撞上就记超时）
-      timeout: WAVE.remapEvery * CHAPTER_SECS,
+      timeout: WAVE.remapEvery * CHAPTER_SECS + chapterHoldSlack(),
       onFrame, verdict,
     });
     for (const tr of res.trace || []) if (tr.side === "P") stuck += tr.stuck;
     for (const c of res.cause) if (c.side === "P") cause.push(c.cause);
     if (res.outcome !== "remap") {
       const outcome = res.timeout ? "timeout" : res.outcome;
-      return { wave: waveNo, kills, outcome, elapsed, stuck, mix, cause, taken };
+      return {
+        wave: waveNo, kills, outcome, elapsed, stuck, mix, cause, taken,
+        holdWaves, holdCleared, holdBest,
+      };
     }
 
     // 章节换图（同 main.remapWaveArena）：新图 + 玩家挪回 tl + 清场，
@@ -548,8 +659,9 @@ function playWaves() {
     maze = generateMaze(dims.cols, dims.rows, waveStyle());
     const tl = corners(dims.cols, dims.rows).tl;
     hero.tank.x = tl.x; hero.tank.y = tl.y; hero.tank.angle = tl.a;
-    hero.ctrl = new AiA(hero, PROXY);
+    hero.ctrl = wrapSeek(new AiA(hero, PROXY));
     actors.length = 1;      // 换图在空场边界发生，本就该只剩玩家
+    zone = null;            // 圈绑在旧图上（新图可能换档位）——留着就是陈旧坐标
     pendingEnter = remapTo;
     remapTo = null;
   }
@@ -599,6 +711,8 @@ if (WAVES) {
   console.log(`两层成长：抽卡 ${DRAFT}${DRAFT === "off" ? "" : `（空降预发 ${PREGRANT} 张）`}`
     + `　敌人词条 ${ELITE ? "开" : "关"}`
     + `　—— 两项都 off 即阶段 24 行为（控制组）`);
+  console.log(`守点波：${HOLD_ON ? "开" : "关（阶段 26 基线的控制组）"}`
+    + `　替身寻点 ${HOLDSEEK ? "on" : "off（替身不会主动进圈，守点波必然打不过）"}`);
 
   const runs = [];
   const tally = { dead: 0, cap: 0, timeout: 0 };
@@ -647,6 +761,34 @@ if (WAVES) {
     + ` / normal ${(mixAll.normal / mixTotal * 100).toFixed(0)}%`
     + ` / hard ${(mixAll.hard / mixTotal * 100).toFixed(0)}%（共 ${mixTotal} 辆）`);
   console.log(`玩家死于：子弹 ${causeAll.bullet} / 激光 ${causeAll.laser} / 地雷 ${causeAll.mine}`);
+
+  // 守点波读数（阶段 27）。**单独打印、不靠 timeout 反推**：守点波吃掉的时间会让
+  // tally.timeout 上涨，而「超时」与「守不住」在统计里长得一模一样，只看收场分不出来。
+  //
+  // 主读数是 **holdBest 的中位数**（最深那次的守点进度秒数）——它是连续量、有分辨率，
+  // 能量出「同一个守点波变难/变易」的方向与幅度。holdCleared/holdWaves 只作为
+  // 「替身有没有在真的尝试」的健康检查，**绝不当人类通过率**（见下方偏差声明）。
+  if (HOLD_ON) {
+    const met = runs.filter((r) => r.holdWaves > 0);
+    const hw = sum(runs.map((r) => r.holdWaves));
+    const hc = sum(runs.map((r) => r.holdCleared));
+    if (!hw) {
+      console.log(`守点波：${TRIES} 次里一次都没走到（起跑第 ${STARTWAVE} 波、封顶第 ${MAXWAVE} 波之间无守点波）`);
+    } else {
+      const best = met.map((r) => r.holdBest).sort((a, b) => a - b);
+      const mid = best[Math.floor(best.length / 2)];
+      console.log(`守点波：遇到 ${hw} 个 / 守满 ${hc} 个（${(hc / hw * 100).toFixed(0)}%）`
+        + `　守点进度秒数：中位 ${mid.toFixed(1)}s`
+        + ` 平均 ${(sum(best) / best.length).toFixed(1)}s`
+        + ` 最深 ${best[best.length - 1].toFixed(1)}s`
+        + `　需求 ${holdNeed(STARTWAVE >= HOLD.from ? STARTWAVE : HOLD.from).toFixed(1)}s`);
+      console.log("  偏差声明：--holdseek 的替身不会边守边躲弹（出圈就被强行拉回来，等于自愿");
+      console.log("    踩线），所以**守点波通过率系统性偏低**，与第 4 关虚高、第 5 关偏低同一");
+      console.log("    类失效。可用的只有相对量：同参数下这一列随波次单调不增、以及改");
+      console.log("    needBase 前后的位移。绝不拿「守满 N 个」当人类通过率。");
+      if (!HOLDSEEK) console.log("    （本次 --holdseek off：替身压根不进圈，这一列恒近 0，只用来确认圈没挡路）");
+    }
+  }
 
   // 抽卡统计：平均抽到几张 + 各卡被抽走的总层数（验证 requires 过滤与卡池覆盖）
   if (DRAFT !== "off") {

@@ -1,8 +1,10 @@
 // ============================================================
 // levels.js — 挑战关卡模式：关卡表 + 过关判定（纯数据 + 纯函数）
-// 零浏览器依赖（只 import config 常量名），smoke 可直接断言。
+// 零浏览器依赖（只 import objectives 的纯函数），smoke 可直接断言。
 // 进度持久化在 settings.js（loadChallengeProgress/saveChallengeProgress）；
 // 关卡流转（LEVEL_OVER 状态机/setupRound 分支）在 main.js。
+// 胜负判定本体自阶段 27 起在 objectives.js（波次的守点/清配额与关卡三型共用
+// 一份表）——这里只剩「关卡表 → 目标规格」的翻译。
 //
 // 关卡 schema：
 //   objective  "eliminate"        歼灭全部敌人
@@ -16,6 +18,8 @@
 //   player     开局强化：{ weapon:"laser"|"scatter"|"mine", shots, shield }
 //   hint       选关卡片与开局提示文案
 // ============================================================
+
+import { evaluate } from "./objectives.js";
 
 export const LEVELS = [
   {
@@ -104,26 +108,25 @@ export const LEVELS = [
 
 export const LEVEL_COUNT = LEVELS.length;
 
-// 过关判定（每帧调用的纯函数）。
-// ctx = { playerAlive, enemiesAlive, levelTimer }
-//   levelTimer：survive 关 = 已存活秒数；eliminateTimed 关 = 剩余秒数。
-// 返回 "win" | "lose" | null（继续打）。
-// 判定顺序：玩家死亡优先于达成——同帧同归于尽算失败（挑战要活着赢）。
-export function evaluateObjective(level, ctx) {
-  if (!ctx.playerAlive) return "lose";
-  switch (level.objective) {
-    case "survive":
-      // 威胁清零 = 提前过关：敌人全灭后没必要在空场硬熬计时（用户实测反馈）
-      if (ctx.enemiesAlive === 0) return "win";
-      return ctx.levelTimer >= (level.mutators.surviveTime ?? 60) ? "win" : null;
-    case "eliminateTimed":
-      if (ctx.enemiesAlive === 0) return "win";
-      return ctx.levelTimer <= 0 ? "lose" : null;
-    case "eliminate":
-    default:
-      return ctx.enemiesAlive === 0 ? "win" : null;
+// 关卡表 → objectives 规格。关卡表用的是「objective 字符串 + mutators 里
+// 各自命名的秒数字段」这套人类可读写法，objectives 只认统一的 { type, secs }，
+// 翻译就放这一处（新增关卡类型时这里加一行，判定逻辑不动）。
+export function objectiveOf(level) {
+  const m = (level && level.mutators) || {};
+  switch (level && level.objective) {
+    case "survive": return { type: "survive", secs: m.surviveTime ?? 60 };
+    case "eliminateTimed": return { type: "eliminateTimed", secs: m.timeLimit ?? 120 };
+    default: return { type: "eliminate" };
   }
 }
+
+// 过关判定（每帧调用的纯函数）。
+// ctx = { playerAlive, enemiesAlive, elapsed }
+//   elapsed：本关**已过**秒数，单调递增（阶段 27 前这里叫 levelTimer，且在
+//   survive 关是已过、在限时关是剩余——同一个变量两种语义，见 objectives.js）。
+// 返回 "win" | "lose" | null（继续打）。真值表与「玩家死优先于达成」都在
+// objectives.js，这里只是薄壳——两处实现必然跑偏，所以只留一处。
+export const evaluateObjective = (level, ctx) => evaluate(objectiveOf(level), ctx);
 
 // 进度宽松校验：progress = 已通关数（0 = 一关未过，解锁第 1 关）。
 // 坏档落 0，越界钳到 LEVEL_COUNT。

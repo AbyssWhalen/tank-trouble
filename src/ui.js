@@ -825,13 +825,32 @@ export function renderHud(ctx, { players, matchScores, isPlaying, challenge, wav
     if (challenge) {
       const timerStr = challenge.timer !== null ? `　⏱ ${Math.ceil(challenge.timer)}s` : "";
       rightText = `第 ${challenge.levelId} 关　敌 ×${challenge.enemiesAlive}${timerStr}`;
+    } else if (wave.gap > 0) {
+      // 波次：空场喘息时改播下一波读秒（此时圈已清，无守点段）
+      rightText = `第 ${wave.wave} 波 清空　下一波 ${wave.gap.toFixed(1)}s　击杀 ${wave.kills}`;
+    } else if (wave.hold) {
+      // 守点波（阶段 27）：**省掉余额段**——配额是 Infinity，「还剩几个」无从谈起
+      // （照原模板会印出 `+Infinity`）。进度用文字精确读数，图形化进度由圈上的
+      // 扇形负责——一处图形一处数字，不为它新造一个进度条原语。
+      // 波号后缀「· 守点」是进波第一眼的规则告知（这一波的动词变了）。
+      const need = Math.round(wave.hold.need * 10) / 10;
+      rightText = `第 ${wave.wave} 波 · 守点　敌 ×${wave.enemiesAlive}`
+        + `　守点 ${wave.hold.progress.toFixed(1)}/${need}s`;
     } else {
-      // 波次：场上敌 ×M（+N 为本波还没登场的），空场喘息时改播下一波读秒
-      rightText = wave.gap > 0
-        ? `第 ${wave.wave} 波 清空　下一波 ${wave.gap.toFixed(1)}s　击杀 ${wave.kills}`
-        : `第 ${wave.wave} 波　敌 ×${wave.enemiesAlive}${wave.left > 0 ? `+${wave.left}` : ""}　击杀 ${wave.kills}`;
+      // 波次：场上敌 ×M（+N 为本波还没登场的）
+      rightText = `第 ${wave.wave} 波　敌 ×${wave.enemiesAlive}${wave.left > 0 ? `+${wave.left}` : ""}　击杀 ${wave.kills}`;
     }
     ctx.fillText(rightText, CANVAS.width - 20, y);
+    // 出圈时在读数下方加一行提示：进度是**冻结**不是衰减，但玩家第一次遇到时
+    // 只会看到数字不动——一句话讲清比让他自己猜快得多（在圈里就不啰嗦）。
+    // 守满之后不再提示：那时圈已经是「完成态」，催人回去站着是噪音。
+    if (wave?.hold && !wave.hold.inside && wave.hold.progress < wave.hold.need) {
+      ctx.fillStyle = THEME.textDim;
+      ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
+      ctx.fillText("站进圈内才计时", CANVAS.width - 20, y + 20);
+      ctx.fillStyle = THEME.textMain;
+      ctx.font = "bold 18px system-ui, 'Microsoft YaHei', sans-serif";
+    }
     ctx.textAlign = "left";
 
     // 波次模式左下角「已获强化」条（抽卡拿了什么，一眼可查——卡是永久的，

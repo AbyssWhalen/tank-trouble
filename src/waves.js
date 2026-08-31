@@ -14,9 +14,13 @@
 //
 // 三层在第 16 波全部到顶（见文件下半部分 eliteSpec 上方的长注释），所以阶段 25
 // 追加了第四层「敌人词条」——同一辆车随波次变强，把封顶推到第 31 波。
+//
+// 阶段 27 追加的不是第五层难度，是**第二个动词**：守点波（`isHoldWave`/`holdNeed`/
+// `waveObjective`，见文件末尾那一节）。前四层都在回答「敌人有多强」，守点波改的是
+// 「这一波要你做什么」——章尾 boss 波把「打光敌人」换成「站住一块地」。
 // ============================================================
 
-import { WAVE, TIER_POOL_BY_MODE, CELL_SIZE, TANK, ENEMY_TRAIT } from "./config.js";
+import { WAVE, TIER_POOL_BY_MODE, CELL_SIZE, TANK, ENEMY_TRAIT, HOLD } from "./config.js";
 import { resolveCircleWalls } from "./collision.js";
 
 // 三档权重的固定枚举顺序（对象字面量插入序即此序，加权抽取才确定）
@@ -124,6 +128,42 @@ export function pickSpawnSpot(maze, hero, occupied, rand = Math.random) {
     return top[Math.min(top.length - 1, Math.floor(clamp(rand(), 0, 1) * top.length))];
   }
   return null;
+}
+
+// ============================================================
+// 守点波（阶段 27）——波次生存的第二个动词
+//
+// 为什么需要它：阶段 26 把曲线的形状调平了，但每一波的任务逐字相同（把 N 辆车打掉），
+// 差别只在数量与强度。而波次的最优解永远是「拉开距离绕柱子对射」——地形的具体形状
+// 与敌人来向从来没进过任何决策。守点把「离开」变成「进度停摆」，第一次让这两样说话。
+//
+// 这一层只管**相位与秒数**（纯算术）；区域实体在 zone.js，判定在 objectives.js。
+// waveSpec 的返回值刻意逐字不变（smoke 有键集合护栏）——守点是独立出口，
+// 免得「这一波什么规格」和「这一波什么规则」两件事搅在一个返回值里。
+// ============================================================
+
+// 第 n 波是不是守点波。相位刻意与章界咬合（HOLD.every === WAVE.remapEvery），
+// 于是守点波恒是每章最后一波，下一波必然换图——smoke 用 shouldRemap(n+1) 钉这一点。
+export function isHoldWave(n) {
+  const w = Math.floor(n);
+  return w >= HOLD.from && (w - HOLD.from) % HOLD.every === 0;
+}
+
+// 第 n 个守点波该守多少秒。按「已出现过几个守点波」算而不是按波号，
+// 于是改 HOLD.every 时秒数曲线自动跟着走（旋钮之间不该有隐式耦合）。
+// 非守点波返回 0（调用方通常先问 isHoldWave，这里只保证不返回垃圾值）。
+export function holdNeed(n) {
+  if (!isHoldWave(n)) return 0;
+  const idx = Math.floor((Math.floor(n) - HOLD.from) / HOLD.every); // 0 = 第一个守点波
+  return Math.min(HOLD.needCap, HOLD.needBase + HOLD.needStep * idx);
+}
+
+// 第 n 波的过波条件（喂 objectives.evaluate）。这是「这一波什么规则」的唯一出口——
+// main / arena 各自的 beginWave 都只调它，两边不许再内联判断波号相位。
+export function waveObjective(n) {
+  return isHoldWave(n)
+    ? { type: "hold", secs: holdNeed(n) }
+    : { type: "clearQuota" };
 }
 
 // ============================================================
