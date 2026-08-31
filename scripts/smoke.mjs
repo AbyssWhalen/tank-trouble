@@ -1180,6 +1180,74 @@ section("守点区域 (zone/hold)");
 }
 
 // ============================================================
+// 转场清理与渲染契约：两条都是「一个模块级单例 / 一个 ctx 调用顺序」，
+// 单元级能钉死，而实机只能看出「画面在抖」「圈溢出去了」这种模糊症状。
+section("转场清理与渲染裁剪 (effects/zone)");
+{
+  const { addShake, updateShake, shakeOffset, resetShake } = await import("../src/effects.js");
+  const { HoldZone } = await import("../src/zone.js");
+
+  // shakeOffset 每帧随机方向，单帧可能恰好接近 0 → 采样取最大绝对值
+  const peak = (n = 40) => {
+    let m = 0;
+    for (let i = 0; i < n; i++) {
+      const o = shakeOffset();
+      m = Math.max(m, Math.abs(o.x), Math.abs(o.y));
+    }
+    return m;
+  };
+
+  {
+    resetShake();
+    check("初始态无震动", peak() === 0);
+    addShake(6, 0.5);
+    check("addShake 后有偏移", peak() > 0);
+    updateShake(0.6);                       // 自然排空（updateEffects 的正常路径）
+    check("updateShake 排空后归零", peak() === 0);
+  }
+  {
+    // 本体：MENU 不跑 updateEffects、PAUSED 刻意不推进，所以「击杀后立刻 Esc 回菜单
+    // 再开一局」只能靠 resetShake 排空——否则余震漏进新一局的 3-2-1 冻结开场
+    addShake(6, 0.5);
+    resetShake();
+    check("resetShake 立刻抹平（新一局不继承上一局的镜头状态）", peak() === 0);
+    // 顺带钉住 addShake 的 `mag >= remain` 闸门没被冻结的余量堵住：
+    // 不清的话 mag 6 的余震会吞掉新一局第一次 mag 5 的击杀震动
+    addShake(5, 0.4);
+    check("清空后新震动能注册（不被旧余量吞掉）", peak() > 0);
+    resetShake();
+  }
+  {
+    // ctx 录音机：zone.render 只调 ctx 的方法/写属性，故可用 Proxy 全记
+    const mkCtx = () => {
+      const calls = [];
+      const ctx = new Proxy({}, {
+        get: (t, k) => (k in t ? t[k] : (...a) => { calls.push(k); return undefined; }),
+        set: (t, k, v) => { t[k] = v; return true; },
+      });
+      return { ctx, calls };
+    };
+    const z = new HoldZone(100, 100, 12);
+
+    const withClip = mkCtx();
+    z.render(withClip.ctx, 864, 672);
+    const noClip = mkCtx();
+    z.render(noClip.ctx);
+
+    check("传竞技场尺寸时裁剪（圈半径 0.95 格 > 半格，贴边的圈会溢出场外）",
+      withClip.calls.includes("clip") && withClip.calls.includes("rect"));
+    check("不传尺寸时不裁剪（默认参数 0 = 不裁，旧调用点语义不变）",
+      !noClip.calls.includes("clip"));
+    // 顺序是承重的：clip 必须在 translate 之前，否则裁剪矩形落在圈局部坐标系里
+    check("裁剪在 translate 之前（矩形是世界坐标不是圈局部坐标）",
+      withClip.calls.indexOf("clip") < withClip.calls.indexOf("translate"));
+    check("裁剪不影响三层绘制本身",
+      withClip.calls.includes("arc") && withClip.calls.includes("fill") &&
+      withClip.calls.includes("stroke") && withClip.calls.includes("restore"));
+  }
+}
+
+// ============================================================
 section("玩家强化池 (upgrades)");
 {
   const {

@@ -25,7 +25,7 @@ import { circleVsCircle, separateCircles, resolveCircleWalls, closestPointOnSegm
 import { fitArena } from "./layout.js";
 import {
   TankExplosion, PickupFlash, ShieldBreak, MuzzleFlash, MineBlast, WallBreak,
-  addShake, updateShake, shakeOffset,
+  addShake, updateShake, shakeOffset, resetShake,
 } from "./effects.js";
 import { castLaserPath, LaserBeam, renderLaserPreview } from "./laser.js";
 import { PowerupSpawner, Powerup, drawPowerupIcon } from "./powerup.js";
@@ -134,7 +134,10 @@ let pendingSoloSlowmo = false; // 单人模式（挑战/波次）：本帧有击
 // —— 挑战关卡模式状态 ——
 let currentLevelIndex = 0;     // 当前在打第几关（LEVELS 下标）
 let challengeProgress = normalizeProgress(loadChallengeProgress() ?? 0); // 已通关数
-let levelTimer = 0;            // 关卡计时：survive 累加 / eliminateTimed 倒数（游戏秒）
+// 关卡计时：**纯粹的「本关已过秒数」，单调递增，三型目标同一语义**（游戏秒）。
+// 阶段 27 前这里是「survive 累加 / eliminateTimed 倒数」的同名两义，HUD 得靠
+// objective 字符串二次分流才显示得对；objectives.js 只认 elapsed 之后那笔债还掉了。
+let levelTimer = 0;
 let levelWallBreak = false;    // 本关地形破坏开关（关卡表指定，覆写全局）
 let levelOutcome = null;       // LEVEL_OVER 时 "win" | "lose"
 
@@ -201,8 +204,13 @@ window.__devHook = {
   },
   wallCount: () => (maze ? maze.walls.length : 0),
   erodedCount: () => (maze ? maze.walls.filter((w) => !w.border && w.hp < WALL.hp).length : 0),
-  // 场上实体计数：验证「每波开局强制补给」与「雷阵跨波保留」都要能数场上的东西
-  fieldCount: () => ({ powerups: powerups.length, mines: mines.length, bullets: bullets.length }),
+  // 场上实体计数：验证「每波开局强制补给」与「雷阵跨波保留」都要能数场上的东西。
+  // `foeBullets` 单独数敌方在膛子弹——守点过波时要清掉的正是这一类（清残敌不清子弹的话，
+  // 已经过波了还会在喘息期被死人的遗弹打死），而光看 bullets 总数分不出是谁的
+  fieldCount: () => ({
+    powerups: powerups.length, mines: mines.length, bullets: bullets.length,
+    foeBullets: bullets.filter((b) => b.owner !== players[0]?.tank).length,
+  }),
   skipCountdown: () => { introTimer = 0; },
   introLeft: () => introTimer,
   slowmoLeft: () => slowmoTimer,
@@ -327,7 +335,13 @@ function setupRound(mode) {
     const pt = players[0].tank;
     if (pc.weapon === "laser") pt.laserShots = pc.shots ?? 1;
     else if (pc.weapon === "scatter") pt.scatterShots = pc.shots ?? 3;
-    else if (pc.weapon === "mine") pt.mineCharges = pc.shots ?? 2;
+    // 持雷必须一并起超时计时：tank.update 见 mineCharges>0 就扣 mineHoldTimer，
+    // 只写存货不写计时的话下一帧 0 <= 0 直接把存货清光（休眠 bug，现在没关卡发雷所以
+    // 不可见；留着等以后哪一关配了 weapon:"mine" 再当新 bug 查一遍不值得）
+    else if (pc.weapon === "mine") {
+      pt.mineCharges = pc.shots ?? 2;
+      pt.mineHoldTimer = POWERUP.mine.holdTimeout;
+    }
     if (pc.shield) pt.applyPowerup("shield");
     spawner = new PowerupSpawner([...level.powerups]);
     levelWallBreak = !!level.wallBreak; // 关卡覆写，不动全局设置
@@ -343,9 +357,6 @@ function setupRound(mode) {
     // 强化是 run 级资产：重来就归零。坦克本体是新建的 → mods 天然中性，
     // 这里只需要清「抽过什么」的账本（HUD 强化条与抽卡池都读它）。
     taken.clear();
-    draft.open = false;
-    draft.offers = [];
-    draft.hover = -1;
   } else {
     // P1 左上角格朝右，P2 右下角格朝左，初始背对，给彼此反应空间。
     // pve 模式 P2 是 AI：keys=null + isAI=true，Player 内建 AiController。
@@ -364,7 +375,15 @@ function setupRound(mode) {
   effects = [];
   powerups = [];
   mines = [];
+  resetShake();      // 上一局的余震不许漏进新一局的开场（见 effects.js 里的理由）
   holdZone = null;   // 上一次波次 run 的圈不许漏进新一局（beginWave 随后会按波号重建）
+  // 抽卡浮层清在**所有模式**共用的这一段而不是 wave 分支里：`updatePlaying` 顶上那道
+  // 抽卡门不分模式，万一 open 漏进 pvp 就是最常玩的模式整局冻死。现在的流程漏不出来
+  // （浮层期间物理冻结所以死不了、Esc 被吞、R 在 PLAYING 无效），但那是三条不变量的
+  // 合力，任一条以后被改动都会把这个洞打开——清在这里成本为零。
+  draft.open = false;
+  draft.offers = [];
+  draft.hover = -1;
   winner = null;
   pendingSoloSlowmo = false;
   // 波次第 1 波必须等实体数组清空后再起（开波补给要 push 进新的 powerups）
@@ -1128,6 +1147,15 @@ function updateWaveFlow(dt) {
     }
     if (players.length > 1) addShake(5, 0.3);
     players = [players[0]];
+    // 连敌方**已出膛的子弹**一起丢掉（阶段 28 补）。清掉车不清弹，①那条不变量只补了一半：
+    // 抽卡浮层是冻结的所以子弹不动，但它后面那 1.5s 喘息刻意不冻结，鬼弹会在庆祝时间里
+    // 接着飞——守点波达成那一瞬场上可能有 3 辆车正对着站桩的玩家开火，「已经过波了还被
+    // 一个不存在的敌人打死」比被残敌打死更不讲理（章界换图确实清子弹，但那在喘息**之后**）。
+    // 普通波恒是清掉最后一辆时那一两发，同一条路径不开特例。
+    // 三条边界刻意留着：玩家自己的子弹留下（被自己的跳弹打死是既有物理，讲理）、
+    // 地雷不清（雷阵跨波保留是阶段 24 刻意的，且雷是静态危险得自己开过去）、
+    // 激光不必清（hitscan 瞬时，不存在“在飞”的激光）。
+    bullets = bullets.filter((b) => b.owner === players[0].tank);
     // 清波 → 先抽卡（冻结），选完才进喘息。无卡可抽（全满层 / 道具全关到没有
     // 一张卡满足 requires）时 openDraft 返回 false，直接进喘息，不弹空浮层。
     if (!openDraft()) waveGapTimer = WAVE.gap;
@@ -1342,7 +1370,8 @@ function renderArena() {
 
   // 守点区域（阶段 27）：**地面标记层**——墙之上、道具之下，于是子弹/坦克/道具/
   // 特效全部盖在它上面。圈是地形语义（告诉你该站哪），要是它盖住战况就本末倒置了。
-  if (holdZone) holdZone.render(ctx);
+  // 传竞技场尺寸做裁剪：圈半径 0.95 格 > 半格，贴边的圈会溢出场外（见 zone.js）
+  if (holdZone) holdZone.render(ctx, arenaW, arenaH);
   // 道具在地上（墙之上、子弹/坦克之下，坦克碾过去盖住它）
   for (const pw of powerups) pw.render(ctx);
   // 地雷贴地（道具之上、子弹之下；坦克开过顶时盖住雷，贴近"碾在脚下"）

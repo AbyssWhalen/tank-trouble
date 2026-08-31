@@ -394,7 +394,11 @@ function playLevel(level) {
   const pc = level.player || {};
   if (pc.weapon === "laser") hero.tank.laserShots = pc.shots ?? 1;
   else if (pc.weapon === "scatter") hero.tank.scatterShots = pc.shots ?? 3;
-  else if (pc.weapon === "mine") hero.tank.mineCharges = pc.shots ?? 2;
+  // 持雷一并起超时计时（同 main）：只写存货不写计时，tank.update 下一帧就把存货清零
+  else if (pc.weapon === "mine") {
+    hero.tank.mineCharges = pc.shots ?? 2;
+    hero.tank.mineHoldTimer = POWERUP.mine.holdTimeout;
+  }
   if (pc.shield) hero.tank.applyPowerup("shield");
 
   // 关卡计时：纯粹的「本关已过秒数」，单调递增（同 main）——限时/生存的秒数
@@ -588,6 +592,12 @@ function playWaves() {
       // 「喘息/换图都在空场边界」这条两边都依赖的不变量）。不计 kills。
       for (const a of actors.slice(1)) a.tank.alive = false;   // actor.alive 是只读投影
       actors.length = 1;
+      // 敌方**已出膛的子弹**一起丢掉（同 main）。清车不清弹，那条不变量只补了一半：
+      // 喘息刻意不冻结，鬼弹会在庆祝时间里接着飞把玩家打死。**必须原地删**——
+      // simulate 每帧对 bullets 重新赋值，这里重新赋值改不到它手上那个引用。
+      for (let i = ctx.bullets.length - 1; i >= 0; i--) {
+        if (ctx.bullets[i].owner !== hero.tank) ctx.bullets.splice(i, 1);
+      }
       draftOnce();            // 清波抽卡（同 main：抽完才进喘息）
       inGap = true;
       gapTimer = WAVE_GAP;

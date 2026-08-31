@@ -39,6 +39,16 @@ export function shakeOffset() {
   return { x: (Math.random() * 2 - 1) * k, y: (Math.random() * 2 - 1) * k };
 }
 
+// 立刻抹平震动（setupRound 调）。**必须有这个出口**：震动是模块级单例，
+// 只有 updateEffects 能排空它，而 MENU 不跑 updateEffects、PAUSED 刻意不推进——
+// 于是「击杀后立刻 Esc → 退到菜单 → 重开一局」会把上一局的余震带进新一局的
+// 3-2-1 冻结开场（画面在没有任何事发生时抖）。新一局不该继承上一局的镜头状态。
+export function resetShake() {
+  shake.t = 0;
+  shake.dur = 0;
+  shake.mag = 0;
+}
+
 // [min, max] 区间取随机数
 function randRange([min, max]) {
   return min + Math.random() * (max - min);

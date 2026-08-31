@@ -105,12 +105,23 @@ export class HoldZone {
     if (this.inside) this.progress = Math.min(this.need, this.progress + dt);
   }
 
-  render(ctx) {
+  // 画三层。`clipW/clipH` 是竞技场世界尺寸（可选）：**必须裁**，因为半径
+  // 0.95 格 = 91.2px 远大于半格（48px），圈落在贴外墙的格子里时会有 43px
+  // 画到场地之外（外框线外的页面背景上）——那不是「圈很大」而是看着像渲染坏了。
+  // 裁在 render 层而不是把贴边格子从 pickZoneSpot 里剔掉：剔掉等于砍掉一整圈
+  // 合法选点（medium 图 9×7 内圈只剩 7×5），而「圈在走廊尽头」正是这一波的
+  // 随机性来源；圈的**逻辑**半径不动（场外的点玩家本来也走不到，无手感影响）。
+  render(ctx, clipW = 0, clipH = 0) {
     const r = this.radius;
     const pulse = 0.5 + 0.5 * Math.sin(this.age * 3.2); // 呼吸（同 Powerup 的手法）
     const live = this.inside;                           // 在圈里 → 整体更实，一眼看出在计时
 
     ctx.save();
+    if (clipW > 0 && clipH > 0) {
+      ctx.beginPath();
+      ctx.rect(0, 0, clipW, clipH);
+      ctx.clip();
+    }
     ctx.translate(this.x, this.y);
 
     // ① 地面底盘：极淡的实心圆，让圈读作「地上画的一块区域」而不是漂浮的环
