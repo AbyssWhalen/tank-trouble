@@ -15,7 +15,7 @@ import { castLaserPath } from "../src/laser.js";
 import { generateMaze, destroyWallsInRadius, destroyWallSegments } from "../src/maze.js";
 import { AiController, findBounceShot } from "../src/ai.js";
 import { closestPointOnSegment, resolveCircleWalls } from "../src/collision.js";
-import { POWERUP, TANK, KEY_BINDINGS, BULLET, CELL_SIZE, SFX, PICKUP_RATE, MATCH_TARGET, MAZE_TIERS, MAZE_STYLES, WALL } from "../src/config.js";
+import { POWERUP, TANK, KEY_BINDINGS, BULLET, CELL_SIZE, SFX, PICKUP_RATE, MATCH_TARGET, MAZE_TIERS, MAZE_STYLES, WALL, MAZE_FLOOR } from "../src/config.js";
 
 let pass = 0;
 let fail = 0;
@@ -674,11 +674,15 @@ section("地图生成 (generateMaze 三风格)");
           }
         }
 
-        // 5) 密度区间（内墙数/内部边总数）
+        // 5) 密度区间（内墙数/内部边总数）。下界**引用生成器保证的那个常量**而不是
+        //    自己写一个数：阶段 28.1 之前这里硬编码 0.05，而生成器并不保证它——
+        //    symmetric×small 有 0.069% 的图落在下面（最薄的是 0 堵内墙的空箱子），
+        //    于是这条断言约 2% 的概率在没人改错东西时变红。护栏挪进 generateMaze
+        //    （低于下限就重抽）之后，这一条才是确定性的。
         const innerEdges = rows * (cols - 1) + cols * (rows - 1);
         const innerWalls = walls.filter((w) => !w.border).length;
         const density = innerWalls / innerEdges;
-        if (density < 0.05 || density > 0.65) { allOk = false; detail = `${tier} 密度 ${density.toFixed(2)} 出界`; break outer; }
+        if (density < MAZE_FLOOR.minDensity || density > 0.65) { allOk = false; detail = `${tier} 密度 ${density.toFixed(2)} 出界`; break outer; }
 
         // 6) symmetric 专项：四面镜像
         if (style === "symmetric") {
@@ -694,6 +698,26 @@ section("地图生成 (generateMaze 三风格)");
       }
     }
     check(`${style} 风格 3 档 × 30 张结构不变量全过`, allOk, detail);
+  }
+
+  {
+    // 退化护栏专项（阶段 28.1）：symmetric×small 是唯一会撞下限的组合（放墙概率的
+    // 尾巴 + ensureConnected/enforceSymmetry 只删不加的复利），未修之前 10 万张里
+    // 有 69 张低于 0.05、其中 3 张一堵内墙都没有。这里拿 400 张压最坏那一格——
+    // 未修的代码在这个样本量下约 24% 会红，修好之后是**构造上**不可能红（生成器
+    // 返回前自己检查）。顺带钉住「宁空旷勿无图」：永远拿得到一张图。
+    const { cols, rows } = MAZE_TIERS.small;
+    const innerEdges = rows * (cols - 1) + cols * (rows - 1);
+    let worst = Infinity;
+    let always = true;
+    for (let i = 0; i < 400; i++) {
+      const mz = generateMaze(cols, rows, "symmetric");
+      if (!mz || !mz.walls.length) { always = false; break; }
+      worst = Math.min(worst, mz.walls.filter((w) => !w.border).length / innerEdges);
+    }
+    check("空箱子护栏：symmetric×small 400 张的最薄一张也达到 MAZE_FLOOR.minDensity",
+      always && worst >= MAZE_FLOOR.minDensity,
+      `最薄密度 ${worst.toFixed(3)} ≥ ${MAZE_FLOOR.minDensity}`);
   }
 }
 

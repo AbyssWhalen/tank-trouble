@@ -15,7 +15,7 @@
 // 每个格用四面墙的开关表示：top/right/bottom/left。相邻两格共享一堵墙。
 // ============================================================
 
-import { CELL_SIZE, WALL_DENSITY, WALL, MAZE_STYLES } from "./config.js";
+import { CELL_SIZE, WALL_DENSITY, WALL, MAZE_STYLES, MAZE_FLOOR } from "./config.js";
 import { closestPointOnSegment } from "./collision.js";
 
 // 四方向表：格间邻接 + 对应墙面名。maze 自用（泛洪/敲墙），ai.js 寻路也复用。
@@ -30,7 +30,27 @@ export const DIRS = [
 // cells[r][c] = { top, right, bottom, left }，true 表示该面有墙
 // walls = 去重后的线段数组 [{x1,y1,x2,y2}, ...]，世界坐标
 // style: MAZE_STYLES 键（sparse/symmetric/rooms），默认 sparse 向后兼容
+//
+// 退化护栏（阶段 28.1）：放墙是概率的、连通修复与对称补齐又只删不加，所以尾巴上能抽出
+// 「几乎没有内墙」的图（symmetric×small 实测 0.069% 落在 MAZE_FLOOR.minDensity 以下，
+// 其中 3/10万 是一堵内墙都没有的空箱子）。低于下限就重抽，理由与取值见 config 的
+// MAZE_FLOOR 注释。重抽走的是同一条完整流程，故其余不变量（双向一致/全连通/出生互达/
+// 外框完整/hp 继承/对称镜像）逐条原样成立。
 export function generateMaze(cols, rows, style = "sparse") {
+  const innerEdges = rows * (cols - 1) + cols * (rows - 1);
+  const floor = innerEdges * MAZE_FLOOR.minDensity;
+  let maze = buildMaze(cols, rows, style);
+  // 抽满 tries 次仍不达标就交付手上这张：地图必须有，宁空旷勿无图（实际概率 ≈1e-38）
+  for (let i = 1; i < MAZE_FLOOR.tries && innerWallCount(maze.walls) < floor; i++) {
+    maze = buildMaze(cols, rows, style);
+  }
+  return maze;
+}
+
+const innerWallCount = (walls) => walls.reduce((n, w) => n + (w.border ? 0 : 1), 0);
+
+// 单次生成（无退化护栏）：generateMaze 的一趟，失败时由它重试
+function buildMaze(cols, rows, style) {
   // --- 1) 全开放起步，仅封闭外边界（风格无关的共同起点）---
   const cells = [];
   for (let r = 0; r < rows; r++) {
