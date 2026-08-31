@@ -920,7 +920,7 @@ section("波次曲线 (waves)");
     waveSpec, pickEnemyLevel, chapterOf, shouldRemap, pickSpawnSpot,
     normalizeWaveBest, isBetterRecord, MIX_KEYS, WAVE_TIERS,
   } = await import("../src/waves.js");
-  const { WAVE, TIER_POOL_BY_MODE } = await import("../src/config.js");
+  const { WAVE, TIER_POOL_BY_MODE, PLAYER_COLORS, ENEMY_COLORS } = await import("../src/config.js");
 
   const specs = Array.from({ length: 40 }, (_, i) => waveSpec(i + 1));
 
@@ -943,6 +943,38 @@ section("波次曲线 (waves)");
     const mono = specs.every((s, i) => i === 0 || s.concurrent >= specs[i - 1].concurrent);
     check("同屏上限 ≤ 硬顶且 ≤ 配额、单调不减", capped && byQuota && mono,
       `concurrent: ${specs.slice(0, 8).map((s) => s.concurrent).join(",")}`);
+  }
+  {
+    // —— 同屏曲线：冻结表 + 尾段台阶（阶段 28）——
+    // 硬顶从 3 抬到 5，但**最重要的断言不是「尾段能爬」而是「中段一个字节没动」**：
+    // CLAUDE.md 记的阶段 26/27/27.1 全部基线都是波次 1~35 的读数，它们要继续当回归
+    // 护栏就必须逐位不变。这一条一红 = 尾段改动漏进了中段（例如漏掉 concurrentEarlyCap）。
+    const long = Array.from({ length: 60 }, (_, i) => waveSpec(i + 1).concurrent);
+    const frozen = [...Array(5).fill(1), ...Array(5).fill(2), ...Array(25).fill(3)];
+    check("波次 1~35 同屏数逐位冻结（阶段 26/27 基线仍是回归护栏）",
+      long.slice(0, 35).every((v, i) => v === frozen[i]),
+      `1~35: ${long.slice(0, 35).join(",")}`);
+    check("尾段台阶：36~45 恒 4、46~60 恒 5",
+      long.slice(35, 45).every((v) => v === 4) && long.slice(45).every((v) => v === 5),
+      `36/41/46/60 → ${[long[35], long[40], long[45], long[59]].join(",")}`);
+    check("同屏硬顶 ≤ 敌人配色数（替代旧的「PLAYER_COLORS 只有 4 色」耦合）",
+      WAVE.concurrentCap <= ENEMY_COLORS.length,
+      `cap ${WAVE.concurrentCap} vs ${ENEMY_COLORS.length} 色`);
+    check("尾段台阶落在章节第一波上（台阶落章界这条既有规则照旧）",
+      shouldRemap(WAVE.concurrentLateFrom), `lateFrom=${WAVE.concurrentLateFrom}`);
+  }
+  {
+    // 敌人配色表（阶段 28）：前三位与 PLAYER_COLORS[1..3] 逐字节相同，所以波次 1~35
+    // 与挑战关的每一帧渲染都不变。这一条一红 = 有人重排了配色表 = 那些帧被动了。
+    check("ENEMY_COLORS 前三位 === PLAYER_COLORS[1..3]（旧帧渲染逐字节不变）",
+      ENEMY_COLORS.slice(0, 3).join(",") === PLAYER_COLORS.slice(1, 4).join(","),
+      `${ENEMY_COLORS.slice(0, 3).join("/")} vs ${PLAYER_COLORS.slice(1, 4).join("/")}`);
+    const hex = /^#[0-9a-f]{6}$/;
+    check("敌人配色：五色互不相同、格式合法、且都不是玩家青绿",
+      new Set(ENEMY_COLORS).size === ENEMY_COLORS.length &&
+      ENEMY_COLORS.every((c) => hex.test(c)) &&
+      ENEMY_COLORS.every((c) => c !== PLAYER_COLORS[0]),
+      ENEMY_COLORS.join("/"));
   }
   {
     const sums = specs.every((s) => Math.abs(MIX_KEYS.reduce((a, k) => a + s.mix[k], 0) - 1) < 1e-9);
@@ -1542,6 +1574,22 @@ section("敌人词条 (waves elite)");
     const bounded = caps.every((c) => c <= WAVE.concurrentCap);
     check("激光配额：21/26/31 波 1/2/3 把，之前恒 0，单调且不超同屏上限",
       caps.join(",") === "0,0,0,0,1,2,3,3" && mono && bounded, caps.join(","));
+  }
+  {
+    // 阶段 28 起硬顶是 5，于是 laserCapAt 里那个 Math.min(…, concurrentCap) 变成空操作，
+    // 「第 4 位同屏 hitscan 狙击手不许存在」这条护栏必须**显式**挂一次（原先是靠 cap
+    // 顺手夹住的）。第 4 位同屏激光兵正是阶段 26 拆掉的那道断崖，别让它从配色表这边回来。
+    const all = Array.from({ length: ENEMY_TRAIT.stepCap + 2 }, (_, i) => laserCapAt(i));
+    check("激光配额全档 ≤ 3（硬顶不再夹它之后的显式护栏）",
+      all.every((c) => c <= 3), `step 0..${ENEMY_TRAIT.stepCap + 1}: ${all.join(",")}`);
+  }
+  {
+    // 错相位护栏（把阶段 26 的双重计数教训写成测试）：尾段同屏台阶那一波不许同时
+    // 有装备档位或连续倍率的变化——否则读数无法归因，而那正是断崖的来源。
+    const w = WAVE.concurrentLateFrom;
+    check(`第 ${w} 波只加一具身体：装备档与倍率都不变`,
+      eliteStep(w) === eliteStep(w - 1) && eliteCreep(w) === eliteCreep(w - 1),
+      `step ${eliteStep(w - 1)}→${eliteStep(w)} creep ${eliteCreep(w - 1)}→${eliteCreep(w)}`);
   }
   {
     // 配额满了的同档友军退回**加量散射**（而不是空手，也不是第二把激光）

@@ -15,7 +15,7 @@
 // ============================================================
 
 import {
-  CANVAS, PLAYER_COLORS, KEY_BINDINGS, MAZE_TIERS, TIER_POOL_BY_MODE,
+  CANVAS, PLAYER_COLORS, ENEMY_COLORS, KEY_BINDINGS, MAZE_TIERS, TIER_POOL_BY_MODE,
   WALL, CELL_SIZE, BULLET, TANK, THEME, ROUND_RESTART_DELAY,
   POWERUP, PICKUP_RATE, MATCH_TARGET, ROUND_INTRO, SLOWMO, STYLE_POOL_BY_MODE, WAVE, UPGRADE,
 } from "./config.js";
@@ -143,8 +143,10 @@ let levelOutcome = null;       // LEVEL_OVER 时 "win" | "lose"
 
 // —— 无尽波次生存状态（阶段 24）——
 // 敌人来去无常：死敌当帧从 players 移除（players[0] 恒为玩家），于是
-// 「场上敌数 = players.length - 1」，颜色槽位也能回收（PLAYER_COLORS 只有 4 色，
-// 0 号是玩家的青绿 → 同屏上限 3 就是这么来的）。曲线在 waves.js，这里只存进度。
+// 「场上敌数 = players.length - 1」，颜色槽位也能回收——槽位取自 ENEMY_COLORS
+// （阶段 28 起敌人有自己的配色表，5 色 ⇒ 同屏上限 5；在那之前是向 PLAYER_COLORS
+// 借槽位、0 号被玩家占掉，于是同屏封在 3——那是配色事故不是设计决定）。
+// 曲线在 waves.js，这里只存进度。
 let waveNo = 0;                // 当前波次（1-based；0=未开局）
 let waveKills = 0;             // 本次生存累计击杀
 let waveQuotaLeft = 0;         // 本波还没投放的敌人数（投放即减，与场上存活无关）
@@ -227,6 +229,12 @@ window.__devHook = {
     enemies: players.length - 1, gap: waveGapTimer, best: { ...waveBest }, newRecord: waveNewRecord,
     goal: waveGoal.type,
   }),
+  // 场上敌人的槽位与配色（阶段 28）。照 fieldCount().foeBullets 的先例——那条是
+  // 「光看 bullets 总数分不出是谁的弹」，这条是**光看截图分不出配色重没重**：
+  // 旧代码槽位循环上界写死 3，第 4 辆会静默拿到与第 3 辆相同的槽位+颜色，
+  // 而两辆同色车在截图上要么恰好离得远看不出、要么被当成「就是这个配色」。
+  // 只读，不进正常交互路径。
+  enemySlots: () => players.slice(1).map((p) => ({ slot: p.index, color: p.color, alive: p.tank.alive })),
   // 快进到第 n 波（跳过前面的慢热，专测换图/large 档/同屏上限）
   forceWave: (n) => { if (currentMode === "wave") beginWave(Math.max(1, n | 0)); },
   // 阶段 27 守点波：holdState 是圈的唯一窥视口（进度靠截图读不准，扇形只有角度）；
@@ -1070,18 +1078,21 @@ function remapWaveArena() {
   if (holdZone) holdZone = makeHoldZone(holdZone.need);
 }
 
-// 投放一辆敌人：颜色槽位取当前空闲的 1..3（0 号是玩家的青绿，所以同屏上限 3），
-// 位置取离玩家最远的空格（pickSpawnSpot），出生朝向对着玩家（别对着墙发呆）。
+// 投放一辆敌人：颜色槽位取当前空闲的 1..ENEMY_COLORS.length（阶段 28 起敌人有自己
+// 的配色表，所以槽位不再被玩家的青绿占去 0 号，同屏上限由 concurrentCap 说话），
+// 位置取离玩家约 spawnIdealCells 格的空格（pickSpawnSpot），出生朝向对着玩家（别对着墙发呆）。
+// 槽位 → 颜色差一位（slot 1 = ENEMY_COLORS[0]）：slot 仍从 1 起是因为它同时喂
+// Player.index（→ label "P2(AI)"），而 players[0] 恒为玩家。
 function spawnWaveEnemy(spec) {
   const hero = players[0].tank;
   const used = new Set(players.slice(1).map((p) => p.index));
   let slot = 1;
-  while (used.has(slot) && slot < PLAYER_COLORS.length - 1) slot++;
+  while (used.has(slot) && slot < ENEMY_COLORS.length) slot++;
   const spot = pickSpawnSpot(maze, hero, players.filter((p) => p.alive).map((p) => p.tank));
   if (!spot) return; // 图太挤（理论上不会）：本帧跳过，下帧再试
   const level = pickEnemyLevel(spec.mix);
   const angle = Math.atan2(hero.y - spot.y, hero.x - spot.x);
-  players.push(new Player(slot, PLAYER_COLORS[slot], null, spot.x, spot.y, angle, true, level));
+  players.push(new Player(slot, ENEMY_COLORS[slot - 1], null, spot.x, spot.y, angle, true, level));
   // 敌人词条（阶段 25）：同一辆车随波次变强。确定性（同波同档同激光配额恒等）——玩家能
   // 学会「第 21 波起场上有一把激光」。装备走 applyPowerup，所以 ai.js 自动会用。
   // 激光按同屏配额发（阶段 26），所以要先数场上还有几把上膛的。

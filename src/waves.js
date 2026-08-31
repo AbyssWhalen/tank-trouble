@@ -7,13 +7,18 @@
 //
 // 难度靠三层叠加，而不是无限拔 AI 强度（AI 只有三档，到顶就到顶了）：
 //   quota       本波敌人总数——被打掉就补，配额清零进下一波（越往后越持久）
-//   concurrent  同屏上限——早期 1 辆单挑、后期 3 辆围攻（读得清、AI 不挤成团）
+//   concurrent  同屏上限——早期 1 辆单挑、中段 3 辆围攻、尾段 4~5 辆（读得清、AI 不挤成团）
 //   mix         三档 AI 权重，随波次从 easy 滑向 hard（hardCap 留点 normal 变化）
-// 同屏上限硬顶 3 有个硬理由：PLAYER_COLORS 只有 4 色，敌人占 1..3 号，
-// 第 4 辆会撞玩家自己的青绿。
+// 同屏上限曾经硬顶 3，理由是「PLAYER_COLORS 只有 4 色、敌人占 1..3 号、第 4 辆撞玩家青绿」
+// ——那从来不是设计决定，是一次配色事故。阶段 28 给敌人独立配色表（config 的
+// ENEMY_COLORS，5 色）把它解开，硬顶变 5，**但台阶只加在尾段**（见 waveSpec 里的
+// concurrent 段：波次 1~35 逐字节不变，第 36 波起第 4 辆、第 46 波起第 5 辆）。
 //
 // 三层在第 16 波全部到顶（见文件下半部分 eliteSpec 上方的长注释），所以阶段 25
 // 追加了第四层「敌人词条」——同一辆车随波次变强，把封顶推到第 31 波。
+// 阶段 28 再把它推到第 46 波：同屏身体数是这六层里唯一**结构上无界**的一层
+// （配额有 cap、mix 有 cap、档位只有两级、装备有 stepCap、倍率钳 1），但它也有
+// 可读性与场地上限，所以是「推远」不是「拆掉」——如实说清，别当成真无尽。
 //
 // 阶段 27 追加的不是第五层难度，是**第二个动词**：守点波（`isHoldWave`/`holdNeed`/
 // `waveObjective`，见文件末尾那一节）。前四层都在回答「敌人有多强」，守点波改的是
@@ -37,11 +42,21 @@ export function waveSpec(n) {
   // 用 (wave-1) 而不是 wave 做除法：这样台阶落在**章节第一波**上（与 chapterOf 同相位），
   // concurrentEvery === remapEvery 时就是「每换一张图恰好加一辆」——压力台阶与地形
   // 换新同时发生，玩家感知得到「这一章的主题变了」，而不是在章中间莫名多出一辆。
-  const concurrent = Math.min(
-    WAVE.concurrentCap,
-    quota,
+  //
+  // 两段台阶（阶段 28）：early 是原来那条、被 concurrentEarlyCap 收在 3，late 从
+  // concurrentLateFrom 起每 concurrentLateEvery 波 +1。**early 的封顶是承重的**——
+  // 少了它，硬顶抬到 5 就会让第 4 辆落在第 16 波、第 5 辆第 21 波，把阶段 26 铲平的
+  // 中段重新推出断崖，并让 CLAUDE.md 里每条基线同时失去回归护栏的身份。
+  // 逐波验算（smoke 有冻结表断言）：1~5 → 1，6~10 → 2，11~35 → 3（与阶段 27 逐字节
+  // 相同），36~45 → 4，46+ → 5。
+  const early = Math.min(
+    WAVE.concurrentEarlyCap,
     1 + Math.floor((wave - 1) / WAVE.concurrentEvery)
   );
+  const late = wave >= WAVE.concurrentLateFrom
+    ? 1 + Math.floor((wave - WAVE.concurrentLateFrom) / WAVE.concurrentLateEvery)
+    : 0;
+  const concurrent = Math.min(WAVE.concurrentCap, quota, early + late);
 
   // easy 线性退场 → hard 线性登场，中间地带全归 normal（不会为负：
   // easy 归零发生在 hard 起步之后，两者重叠区权重和 < 1）
@@ -170,9 +185,15 @@ export function waveObjective(n) {
 // 敌人词条（阶段 25）——把封顶从第 16 波推到第 31 波
 //
 // 为什么需要它：waveSpec 的四个旋钮在第 16 波全部到顶（quotaCap 12 /
-// concurrentCap 3 / hardCap 0.8 / largeFrom 11），第 16 波与第 26 波的规格
+// 同屏 3 / hardCap 0.8 / largeFrom 11），第 16 波与第 26 波的规格
 // 逐字节相同——「无尽」其实是无限重复同一波。而三层里没有一层还能往上加：
 // 同屏受色板限制（4 色）、AI 只有三档。所以增量只能来自「同一辆车更强」。
+//
+// 阶段 28 补记：上一段那条「同屏受色板限制」在当时是**误认**（详见文件头），
+// 敌人配色独立成 ENEMY_COLORS 之后同屏在尾段解到 5，所以「三层全封顶」这个
+// 前提今天只对波次 1~35 成立。词条层本身一字未改：它的台阶仍在第 31 波到顶，
+// 第 36 / 46 波的增量由同屏那一层给，两者**刻意不同相位**（见 config 的
+// concurrentLateFrom 注释）。
 //
 // 两条纪律：
 // 1. **只复用已有机制**（护盾 / 武器改装槽 / 坦克物理倍率），ai.js 一行不改。
@@ -214,11 +235,16 @@ export function eliteCreep(n) {
   return clamp((Math.max(1, Math.floor(n)) - ENEMY_TRAIT.creepFrom) * ENEMY_TRAIT.creepRate, 0, 1);
 }
 
-// 同屏「已上膛激光兵」上限（阶段 26）：随档位 1 → 2 → 3，封顶 concurrentCap。
+// 同屏「已上膛激光兵」上限（阶段 26）：随档位 1 → 2 → 3，再被 concurrentCap 夹一次。
 // 为什么激光要按**数量**给而不是按档位全给——旧规则第 26 波起每一辆 hard 都持激光，
 // 而 hardCap 0.8 × 同屏 3 ≈ 同屏 2.4 把 hitscan 狙。中位存活 5.6s 还不是最糟的，
 // 最糟的是技术档差塌了：normal 替身 5.6s vs hard 替身 5.7s（第 11 波两者差 6.3s）。
 // 技术不再影响结果 = 不是难，是不讲理。详细理由与数据在 config 的 laserQuota 注释。
+// 阶段 28 注意：硬顶抬到 5 之后这个 Math.min **变成空操作**，真正的上限从此只由
+// laserQuota 数组自己给（[1,2,3] ⇒ 恒 ≤3）。所以「第 4 位同屏 hitscan 狙击手不许存在」
+// 这条护栏从「靠 cap 顺手夹住」改成 smoke 里一条显式断言（laserCapAt(step) <= 3
+// 对全部 step）。min 本身留着：它表达的是「狙击手不可能多于身体」这条真约束。
+// 第 46 波是「5 辆里 3 把激光」，比例反而降了——这是想要的方向。
 export function laserCapAt(step) {
   const q = ENEMY_TRAIT.laserQuota;
   const i = Math.floor(step) - ENEMY_TRAIT.laserFrom;
