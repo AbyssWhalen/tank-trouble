@@ -189,7 +189,8 @@ function simulate({ maze, actors, types, erode, timeout, onFrame, verdict }) {
   };
 
   // 激光结算：与 main.fireLaser 同判定（沿路径最早命中即截断，护盾可挡）
-  const fireLaser = (origin) => {
+  // shooter 必传：出膛点贴墙时会被钳进射手车体圆内，首段不跳过射手就每发自杀
+  const fireLaser = (origin, shooter = null) => {
     const pts = castLaserPath(origin.x, origin.y, origin.angle, maze.walls);
     for (let i = 0; i < pts.length - 1; i++) {
       let hit = null;
@@ -197,6 +198,7 @@ function simulate({ maze, actors, types, erode, timeout, onFrame, verdict }) {
       const segLen = Math.hypot(b.x - a.x, b.y - a.y) || 1;
       for (const p of actors) {
         if (!p.alive) continue;
+        if (i === 0 && shooter && p === shooter) continue; // 首段跳过射手
         const cp = closestPointOnSegment(p.tank.x, p.tank.y, a.x, a.y, b.x, b.y);
         if (Math.hypot(p.tank.x - cp.x, p.tank.y - cp.y) > TANK.radius) continue;
         const t = Math.hypot(cp.x - a.x, cp.y - a.y) / segLen;
@@ -284,13 +286,17 @@ function simulate({ maze, actors, types, erode, timeout, onFrame, verdict }) {
       );
       if (!tripped) continue;
       m.exploded = true;
+      // 炸墙排在伤害结算**之前**——与 main.js:805-816 同序。
+      // 今天两种顺序结果相同（destroyWallsInRadius 只改 maze.walls/cells，
+      // 而伤害判定只读坦克坐标与雷位，互不依赖），但顺序一旦分叉，将来谁给
+      // 爆炸加上「墙能挡波及」就会让两份副本给出不同结局——正是「代码看着
+      // 一样、行为不一样」那种最阴的跑偏。同序是免费的，先对齐
+      if (erode) destroyWallsInRadius(maze, m.x, m.y, POWERUP.mine.wallBlastRadius);
       for (const p of actors) {
         if (!p.alive) continue;
         if (Math.hypot(p.tank.x - m.x, p.tank.y - m.y) >= POWERUP.mine.blastRadius) continue;
         kill(p.tank, "mine");
       }
-      // 炸墙（与 main 同步：walls/cells 原子删除，受地形开关管）
-      if (erode) destroyWallsInRadius(maze, m.x, m.y, POWERUP.mine.wallBlastRadius);
     }
     mines = mines.filter((m) => !m.exploded);
 
@@ -298,7 +304,7 @@ function simulate({ maze, actors, types, erode, timeout, onFrame, verdict }) {
     for (let i = 0; i < actors.length; i++) {
       const res = actors[i].tank.tryFire(bullets, controls[i].fire, maze.walls);
       for (const b of res.bullets) bullets.push(b);
-      if (res.laser) fireLaser(res.laser);
+      if (res.laser) fireLaser(res.laser, actors[i]); // 补传射手（首段跳过自己）
       const mine = actors[i].tank.tryDeploy(controls[i].special, maze.walls);
       if (mine) mines.push(mine);
     }
@@ -478,7 +484,7 @@ function playWaves() {
         if (!zone || zone.done) return c;
         if (yieldT > 0) { yieldT -= dt; return c; }
         if (zone.contains(hero.tank.x, hero.tank.y)) { seekStuck = 0; path = []; return c; }
-        seekStuck = moved < TANK.speed * dt * 0.35 ? seekStuck + dt : 0;
+        seekStuck = moved < TANK.moveSpeed * dt * 0.35 ? seekStuck + dt : 0;
         if (seekStuck > 0.8) { seekStuck = 0; yieldT = 1.2; path = []; return c; }
         // 路点：BFS 下一格心；同格/不可达就退化成朝圈心直线（圈心一定在本格里）
         const from = cellAt(hero.tank.x, hero.tank.y);
@@ -527,7 +533,15 @@ function playWaves() {
     if (waveGoal.type === "hold") {
       const spot = pickZoneSpot(maze, hero.tank);
       zone = spot ? new HoldZone(spot.x, spot.y, waveGoal.secs) : null;
-      holdWaves++;
+      // 挑不出圈就退回普通清场波（同 main.beginWave）：hold 目标 + quotaLeft=Infinity
+      // + 没有圈 = 死局（holdSecs 恒 0，verdict 永不收场，只能靠 timeout 兜）。
+      // 跑分侧尤其要修：那会被记成一次「守不住」，静默污染 holdCleared 读数。
+      if (!zone) {
+        waveGoal = { type: "clearQuota" };
+        quotaLeft = waveSpec(n).quota;
+      } else {
+        holdWaves++;
+      }
     } else {
       zone = null;   // 普通波必须清，否则上一波的圈留在图上
     }
@@ -551,9 +565,11 @@ function playWaves() {
       zone.update(dt, hero.tank);
       if (zone.progress > holdBest) holdBest = zone.progress;
     }
-    if (!hero.alive) return; // 收场交给 verdict，别再调度
-
-    // 死敌当帧出列（同 main 段 6.5）：enemiesAlive 才是精确值，颜色/编号也回收
+    // 死敌当帧出列（同 main 段 6.5）：enemiesAlive 才是精确值，颜色/编号也回收。
+    // **必须排在「玩家死了就早退」之前**：main 的 waveKills++ 在 hitPlayer 里、
+    // 与玩家自己死没死无关，所以同帧互换（替身与最后一辆敌人对射同归）在 main 记 1 杀、
+    // 在这里原先记 0——两份结算副本对同一件事给出不同的数。影响只在每 run 最后一帧、
+    // 至多 1 杀，但 CLAUDE.md 里「击杀 1.7→1.9」这类读数就是拿它比的。
     for (let i = actors.length - 1; i >= 1; i--) {
       if (!actors[i].alive) {
         // 战场回收：按 mods.salvage 概率在尸体位置掉一个道具（同 main.hitPlayer）。
@@ -570,6 +586,7 @@ function playWaves() {
         kills++;
       }
     }
+    if (!hero.alive) return; // 收场交给 verdict，别再调度
 
     const enemiesAlive = actors.length - 1;
     if (inGap) {
@@ -811,7 +828,7 @@ if (WAVES) {
     console.log("  " + UPGRADES.map((u) => `${u.id} ${layers.get(u.id)}`).join(" / "));
   }
   console.log("注：替身不是人类——帧级瞄准偏强、只锁 world.players 里第一个活敌偏弱");
-  console.log("    （波次里同屏最多 3 辆，被另外两辆背刺的概率比关卡更高）。绝对波次不");
+  console.log(`    （波次里同屏最多 ${WAVE.concurrentCap} 辆，被其余几辆背刺的概率比关卡更高）。绝对波次不`);
   console.log("    等于人类水平，改 WAVE 数值后重跑同参数看相对位移。");
   process.exit(0);
 }

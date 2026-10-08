@@ -156,6 +156,8 @@ export const KEY_BINDINGS = [
   { forward: "Numpad8", back: "Numpad5", left: "Numpad4", right: "Numpad6", fire: "Numpad0", special: "NumpadAdd" },
 ];
 
+// 键位黑名单在 UPGRADE 之后定义（它要读 UPGRADE.offers 算抽卡数字键），见文件下方。
+
 // 回合结束到下一局重开的延迟（秒）
 export const ROUND_RESTART_DELAY = 1.5;
 
@@ -258,6 +260,26 @@ export const UPGRADE = {
   salvageAdd: 0.25,     // 战场回收：每层 +25% 击杀掉落概率
   salvageSlack: 2,      // 掉落绕开 maxOnField 的软顶余量（防一波 12 个配额铺满一地）
 };
+
+// 不许绑成玩家键位的键，**两类**（原先只有第一类，那正是这个缺陷的根因）：
+//   ① 外壳/系统语义键：Esc=暂停·取消、F11=全屏（主进程消费）
+//   ② 界面快捷键：游戏自己在状态机里硬编码消费的键。少了这一类会出静默事故——
+//      KeyR 是四个终局态（ROUND_OVER/MATCH_OVER/LEVEL_OVER/WAVE_OVER）的「重开」：
+//      把任一移动键绑到 R 之后，结算横幅一出来、手上再点一下前进，刚打完的整场
+//      大比分就被静默清零重开，没有确认、玩家也无从得知原因。
+//      Escape 一直安全纯属巧合——它同时是系统键而被 ① 收进去了，这层意外覆盖
+//      恰好把 KeyR 这个缺口藏住了。
+// **两条路径都要用这张表**：改键面板的捕获校验（拒绝 + 错误音），以及
+// settings.initSettings 的加载过滤——只堵捕获的话，已经把 R 绑上去的存量存档
+// 重启后照旧中招，而那批玩家恰恰是唯一会踩到的人。
+// Digit1..N 由 UPGRADE.offers **算出来**而不是写死三个：抽卡浮层的消费处是
+// `isJustPressed(`Digit${i+1}`)`（模板串，grep "Digit1" 搜不到），上界跟着 offers 走。
+// 硬编码的话 offers 调到 4 时黑名单会静默脱钩（smoke 有一条断言钉住这个联动）。
+export const RESERVED_KEYS = Object.freeze([
+  "Escape", "F11",
+  "KeyR",
+  ...Array.from({ length: UPGRADE.offers }, (_, i) => `Digit${i + 1}`),
+]);
 
 // 敌人词条（阶段 25，只作用于 wave 模式的投放敌人）。
 // 只复用已有机制（护盾 / 武器改装槽 / 坦克物理倍率），**ai.js 一行不改**——

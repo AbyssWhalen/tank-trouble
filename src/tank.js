@@ -128,9 +128,10 @@ export class Tank {
     }
 
     // 激光：消耗一发，返回发射意图；打完存货自动恢复普通弹
+    // 出膛点做贴墙修正（与 spawnBullet 同一套钳位），否则贴墙时从墙背面出膛
     if (this.laserShots > 0) {
       this.laserShots--;
-      return { bullets: [], laser: this.muzzlePoint() };
+      return { bullets: [], laser: this.muzzlePoint(walls) };
     }
 
     return { bullets: [this.spawnBullet(this.angle, walls)], laser: null };
@@ -162,13 +163,30 @@ export class Tank {
     return new Mine(mx, my, this);
   }
 
-  // 炮口出膛点（激光发射/预瞄虚线用；子弹的出膛另在 spawnBullet 里
-  // 按各自散射角独立算并做贴墙修正）。angle 一并给出方便直接作发射意图。
-  muzzlePoint() {
+  // 炮口出膛点（激光发射/预瞄虚线/AI 开火门共用）。
+  // angle 一并给出方便直接作发射意图。
+  // walls: 给了就做贴墙修正——炮口(36px)比车体碰撞半径(16px)伸出 20px，
+  //   贴墙时炮口已越到墙另一侧，从那里投射激光会从墙背面出膛 = 隔墙杀。
+  //   这与 spawnBullet 里注释「穿墙 bug 的根因」的是同一处几何，子弹早有
+  //   钳位、激光原先没有（阶段 28.3 补）。钳位后贴墙开激光会撞墙反弹回来
+  //   打死自己，与子弹「贴脸怼墙开炮会弹回来」的既有手感一致。
+  //   省略 walls 时行为与钳位前逐字节相同（旧调用点语义不变）。
+  // 注意：钳位后出膛点可能落在自己车体圆内，故 main/arena 的 fireLaser
+  //   必须在首段跳过射手自己（反弹段照旧可自杀）。
+  muzzlePoint(walls) {
     const d = TANK.bodyLength / 2 + TANK.barrelLength + BULLET.radius + 2;
+    let dist = d;
+    if (walls && walls.length) {
+      const mx = this.x + Math.cos(this.angle) * d;
+      const my = this.y + Math.sin(this.angle) * d;
+      for (const w of walls) {
+        const t = segmentVsSegmentParam(this.x, this.y, mx, my, w.x1, w.y1, w.x2, w.y2);
+        if (t !== null) dist = Math.min(dist, t * d - BULLET.radius - 1);
+      }
+    }
     return {
-      x: this.x + Math.cos(this.angle) * d,
-      y: this.y + Math.sin(this.angle) * d,
+      x: this.x + Math.cos(this.angle) * dist,
+      y: this.y + Math.sin(this.angle) * dist,
       angle: this.angle,
     };
   }

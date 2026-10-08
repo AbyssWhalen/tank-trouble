@@ -40,9 +40,38 @@ export class Bullet {
     }
 
     // 拖尾采样：记录移动前的位置（撞墙修正后的最终位置由下一帧记录）
+    // 每帧一个采样点，与子步数无关——拖尾是表现层，60fps 下逐字节不变
     this.trail.push({ x: this.x, y: this.y });
     if (this.trail.length > 6) this.trail.shift();
 
+    // 隧道效应防护：碰撞是「先移动再采样」的离散检测，一帧位移超过弹径
+    // (2×radius=6px) 时存在「上一帧在墙内侧、这一帧已在墙外侧、中间从未与
+    // 墙重叠」的相位——子弹直接穿墙飞出场外，还占着 maxAlive 槽位到寿命尽
+    // (10s)，症状是「开火键偶尔按不出子弹」。main 的 dt 钳位上界 0.05s(20fps)
+    // 对应 9px > 6px，所以钳位本身防不住它、反而是触发源。
+    // 修法是把整段位移拆成 ≤maxSubStep 的子步，各自独立解算碰撞——
+    // 位移总量与反弹时序都保持不变（不是把 dt 截短让子弹变慢）。
+    //
+    // maxSubStep 必须 ≤ radius，不能取 radius*1.5：子步大于弹径半时，子弹能
+    // 一步跨到墙的【背面】再被采到，此时 circleVsSegment 的法线指向背面一侧，
+    // 推出方向朝墙外更深、反弹后下一子步又撞回来——二次反弹把速度转回原方向，
+    // 净效果是「撞墙不减速直接穿过去」，比原 bug 更难看。取 radius 时
+    // 「上一子步距墙 >radius（未采到）」蕴含「本子步后距墙 >0（仍在正面）」，
+    // 于是撞击总在正面被采到，法线方向恒定正确。
+    // 60fps 下 speed*dt 恰好 = 3px = radius ⇒ ceil(3/3)=1 仍是单步（斜向同理，
+    // hypot 仍为 speed），故正常帧零额外开销、arena 固定 dt=1/60 跑分逐字节不变。
+    const speed = Math.hypot(this.vx, this.vy);
+    const maxSubStep = BULLET.radius;
+    const steps = Math.max(1, Math.ceil((speed * dt) / maxSubStep));
+    const sub = dt / steps;
+    for (let s = 0; s < steps; s++) {
+      this.stepMove(sub, walls, erode);
+      if (this.dead) return;
+    }
+  }
+
+  // 单个子步：移动 + 逐墙反弹解算。由 update 调用，不对外。
+  stepMove(dt, walls, erode) {
     // 沿速度移动
     this.x += this.vx * dt;
     this.y += this.vy * dt;

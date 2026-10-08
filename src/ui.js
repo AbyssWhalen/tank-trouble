@@ -609,7 +609,7 @@ export function renderRebindOverlay(ctx, view) {
   ctx.fillText("键位设置", cx, p.y + 40);
   ctx.fillStyle = THEME.textDim;
   ctx.font = "13px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.fillText("点击键位后按下新键 · Esc 取消捕获（Esc / F11 不可绑定）", cx, p.y + 72);
+  ctx.fillText("点击键位后按下新键 · Esc 取消捕获（R / 数字键 / Esc / F11 不可绑定）", cx, p.y + 72);
 
   // 两列表头（玩家色圆点 + 名称）
   for (let i = 0; i < 2; i++) {
@@ -1157,10 +1157,16 @@ export function renderLevelOverBanner(ctx, view) {
   ctx.fillText("R  重试          Esc  返回选关", cx, 560);
 }
 
-// 波次生存结算横幅。view = { wave, kills, best, newRecord, mouse }
+// 波次生存结算横幅。view = { wave, kills, best, newRecord, hadRecord, mouse }
 // 没有胜负——只有「活到第几波」，所以标题用中性色，破纪录才上金色。
+// hadRecord = 本次开始前是否已有历史记录（main 在覆盖 waveBest 之前抓的快照）。
+// 少了它，下面那条「首战告负」在构造上不可达：它要 newRecord===false 且
+// best.wave===0，而全新档任何一次结束都 wave>=1 ⇒ newRecord 必真，两者互斥。
+// **金色与奖杯只给「破了一个真的存在过的记录」**：给「第一把就死在第 1 波」
+// 发奖杯读起来像在嘲讽。
 export function renderWaveOverBanner(ctx, view) {
-  const { wave, kills, best, newRecord, mouse } = view;
+  const { wave, kills, best, newRecord, hadRecord = true, mouse } = view;
+  const brokeRecord = newRecord && hadRecord;
   const { x: mx, y: my } = mouse;
   const cx = CANVAS.width / 2;
 
@@ -1169,7 +1175,7 @@ export function renderWaveOverBanner(ctx, view) {
 
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillStyle = newRecord ? "#d99e00" : THEME.textMain;
+  ctx.fillStyle = brokeRecord ? "#d99e00" : THEME.textMain;
   ctx.font = "bold 56px system-ui, 'Microsoft YaHei', sans-serif";
   ctx.fillText(`活到第 ${wave} 波`, cx, 240);
 
@@ -1178,11 +1184,11 @@ export function renderWaveOverBanner(ctx, view) {
   ctx.fillText(`击杀 ${kills}`, cx, 306);
 
   ctx.font = "18px system-ui, 'Microsoft YaHei', sans-serif";
-  ctx.fillStyle = newRecord ? "#d99e00" : THEME.textDim;
+  ctx.fillStyle = brokeRecord ? "#d99e00" : THEME.textDim;
   ctx.fillText(
-    newRecord
+    brokeRecord
       ? "🏆 新纪录！"
-      : best.wave > 0
+      : hadRecord
         ? `历史最高：第 ${best.wave} 波 · 击杀 ${best.kills}`
         : "首战告负，再来一把",
     cx, 366

@@ -363,9 +363,29 @@ export class AiController {
     // 避让半径按爆炸波及圈算（别人踩雷自己也在圈内会陪葬），不是触发圈
     const mineClear = POWERUP.mine.blastRadius + TANK.radius * 0.5;
     const mineHazards = (world.mines || []).map((m) => ({ x: m.x, y: m.y, r: mineClear }));
-    const mineBlocked = mineHazards.length
-      ? new Set(mineHazards.map((h) => `${Math.floor(h.x / CELL_SIZE)},${Math.floor(h.y / CELL_SIZE)}`))
-      : null;
+    // BFS 按格心距禁行：68px 爆炸圈 > 48px 半格，所以一颗雷常常同时威胁
+    // 相邻格，floor(x/CELL) 只禁雷所在那一格会漏掉 57.6% 的雷位——改为
+    // 半径感知扩容（实测平均禁行格 2.03→2.74，即多禁的都是真在圈内的格）。
+    // mineBlockedCore 只含雷自己那一格 = 扩容前的旧集合，留作寻路的中间降级
+    // 档（见 findPath 调用处：扩容会让「算不出路」的比例 +3.4pp，而最终降级
+    // 是**完全无视雷**，没有中间档时那 3.4pp 比扩容前更差）。
+    const mineBlocked = mineHazards.length ? new Set() : null;
+    const mineBlockedCore = mineHazards.length ? new Set() : null;
+    if (mineBlocked) {
+      for (const h of mineHazards) {
+        const cx = Math.floor(h.x / CELL_SIZE);
+        const cy = Math.floor(h.y / CELL_SIZE);
+        mineBlockedCore.add(`${cx},${cy}`);
+        for (let dy = -2; dy <= 2; dy++) {
+          for (let dx = -2; dx <= 2; dx++) {
+            const cellCenterX = (cx + dx + 0.5) * CELL_SIZE;
+            const cellCenterY = (cy + dy + 0.5) * CELL_SIZE;
+            const dist = Math.hypot(cellCenterX - h.x, cellCenterY - h.y);
+            if (dist <= mineClear) mineBlocked.add(`${cx + dx},${cy + dy}`);
+          }
+        }
+      }
+    }
 
     // —— 敌方激光预瞄线 → 全路径静态危险带 ——
     // 激光是瞬时 hitscan：线上任何点被击中的延迟只是对手的反应时间，与离炮口
@@ -384,7 +404,9 @@ export class AiController {
     const laserHazards = [];    // 全部采样：躲弹罚分 / 压线判定 / 道具过滤用
     const laserFarHazards = []; // 炮口豁免圈外的采样：直追改道 / BFS 封格用
     if (enemyHasLaser && this.cfg.dodgeHorizon > 0) {
-      const em = enemy.muzzlePoint();
+      // 出膛点传 walls：与对手实际发射、与屏幕上那条预瞄虚线同源。
+      // 不传的话对手贴墙时 AI 会去躲一条穿墙的假线（而真线是反弹的）
+      const em = enemy.muzzlePoint(world.maze.walls);
       laserPath = castLaserPath(em.x, em.y, em.angle, world.maze.walls);
       const exempt = CELL_SIZE * AI.laserMuzzleExempt;
       for (let i = 0; i < laserPath.length - 1; i++) {
@@ -408,10 +430,14 @@ export class AiController {
     const moveHazards = mineHazards.concat(laserHazards);
     const chaseHazards = mineHazards.concat(laserFarHazards);
     let blockedCells = mineBlocked;
+    let blockedCellsCore = mineBlockedCore; // 中间降级档：雷只禁自己那一格
     if (laserFarHazards.length) {
       blockedCells = new Set(blockedCells ?? []);
+      blockedCellsCore = new Set(blockedCellsCore ?? []);
       for (const h of laserFarHazards) {
-        blockedCells.add(`${Math.floor(h.x / CELL_SIZE)},${Math.floor(h.y / CELL_SIZE)}`);
+        const key = `${Math.floor(h.x / CELL_SIZE)},${Math.floor(h.y / CELL_SIZE)}`;
+        blockedCells.add(key);
+        blockedCellsCore.add(key); // 激光线两档都禁：它不是「圈」而是线，无扩容可退
       }
     }
 
@@ -473,7 +499,13 @@ export class AiController {
       // 打完一轮散射（+3 发在场）后 gunReady 骤降变消极，与道具意图相反
       if (!b.dead && b.owner === self && b.kind !== "scatter") myShots++;
     }
-    const gunReady = this.fireTimer <= 0 && myShots < ammoCap;
+    // 节奏门与弹药门拆开：激光是 hitscan，不产生实体弹也不占 maxAlive
+    // （tank.js 的限流对持激光者整段跳过），所以「自留弹预算」那套立论
+    // （远距守纪律防乱泼弹 + 留一发膛内余量等下个必中窗口）对它一条都不成立。
+    // 焊在一起会让「场上自弹占满预算」时连那唯一一发必中激光都拒开。
+    // 普通弹三条分支照旧用 gunReady，定义逐字不变。
+    const rhythmReady = this.fireTimer <= 0;
+    const gunReady = rhythmReady && myShots < ammoCap;
 
     // 近战反打：贴脸 + 车身可达 + 枪已就绪 → 压倒一切转炮开火。
     // 可达门用 hasClearPath 而非零宽 los：closeCombatRange(130) > CELL_SIZE(96)，
@@ -663,9 +695,18 @@ export class AiController {
           this.replanTimer = this.cfg.replanInterval;
           this.path = findPath(world.maze, cellOf(self, world.maze), goalCell, blockedCells);
           // 带禁行格算不出路 ≠ 物理不可达——rooms 风格门少，一颗雷封住门格
-          // 就割断连通。降级重算无视雷的物理路径（宁可绕雷圈也别直怼穿墙）
+          // 就割断连通。三档降级：全爆炸圈 → 只禁雷所在格 → 完全无视雷。
+          // 中间档是必需的而不是锦上添花：半径扩容让「算不出路」+3.4pp，
+          // 而最后一档完全无视雷，没有中间档时那 3.4pp 反而比扩容前更差
+          // （扩容前它至少还绕开雷自己那一格）。有了这一档，新行为在
+          // **任何**局面都不弱于扩容前。
           if (this.path.length === 0 && blockedCells) {
-            this.path = findPath(world.maze, cellOf(self, world.maze), goalCell, null);
+            if (blockedCellsCore && blockedCellsCore.size < blockedCells.size) {
+              this.path = findPath(world.maze, cellOf(self, world.maze), goalCell, blockedCellsCore);
+            }
+            if (this.path.length === 0) {
+              this.path = findPath(world.maze, cellOf(self, world.maze), goalCell, null);
+            }
           }
           this.pathGoalCell = goalCell;
         }
@@ -704,6 +745,9 @@ export class AiController {
           turn = Math.abs(bDiff) > 0.03 ? Math.sign(bDiff) : 0;
           move = 0; // 站定吊射，炮口即武器
         }
+      } else {
+        // 不再维护的解立刻作废——与 560 行闪避期的处理一致，防陈旧解泄漏
+        this.bounceShot = null;
       }
 
       // —— 4) 卡住检测：连续想动 stuckWindow 秒却没挪出 stuckMinDist → 脱困 ——
@@ -740,12 +784,14 @@ export class AiController {
     //     - 避战模式（敌人有护盾）：照常开火——盾挡一发即碎，先点破它的盾
     //     - 防守模式（敌人有散射）：缩小窗口 40%，更谨慎
     let fire = false;
-    if (self.laserShots > 0 && gunReady) {
+    if (self.laserShots > 0 && rhythmReady) {
       // 持激光：hitscan 几何精确判定替代拦截点/质量门——投射当前炮口路径，
       // 扫到敌圆（判定半径收紧到 0.9 倍防擦边浪费）才开，每一发都是必中。
       // easy/normal 只认首段（直线激光）；hard（bounceAim）认全路径——
       // 会转着炮口找角度用反弹激光隔墙烧人。
-      const m = self.muzzlePoint();
+      // 只受节奏门约束（见 gunReady 处注释）；出膛点传 walls 与实际发射同源，
+      // 否则贴墙时 AI 会按穿墙路径判「扫到了」而实弹已被钳成反弹路径。
+      const m = self.muzzlePoint(world.maze.walls);
       const path = castLaserPath(m.x, m.y, m.angle, world.maze.walls,
         this.cfg.bounceAim ? {} : { maxBounces: 0 });
       const hitR = TANK.radius * 0.9;
@@ -785,7 +831,9 @@ export class AiController {
       // hard 也该会——利用可破坏地形与玩家同权。语义门槛收紧：只有已经
       // 朝向敌人（炮口↔敌方向 <30°）时才打，避免乱枪打墙浪费弹药预算。
       if (Math.abs(aimErr) < Math.PI / 6) {
-        const m = self.muzzlePoint();
+        // 出膛点传 walls：不钳位时贴着墙的炮口已在墙背面，扫描会跳过
+        // 「正顶着的那堵墙」去找下一堵，于是最该磨的墙反而磨不到
+        const m = self.muzzlePoint(world.maze.walls);
         const reach = CELL_SIZE * 2; // 只磨脸前两格内的墙（远墙磨不划算）
         const ex2 = m.x + Math.cos(self.angle) * reach;
         const ey2 = m.y + Math.sin(self.angle) * reach;
@@ -937,6 +985,8 @@ export class AiController {
     //   A. 附近无弹幕威胁（1.5 秒内不会被子弹命中）
     //   B. 敌人无法拦截（距离远 >6 格 OR 无视线守株待兔）
     // relaxed 模式（避战时）：只要没有迫在眉睫的弹幕威胁（<0.8 秒）就敢捡，忽略敌人距离
+    // 注意：这里声明的 1.5s/0.8s 时间窗实际受 findThreat 的 dodgeHorizon 钳位
+    // （normal 0.4s、hard 1.1s），所以 normal 档的真实感知窗是 min(1.5, 0.4)=0.4s
     const threat = this.findThreat(self, world.bullets);
     const threatLimit = relaxed ? 0.8 : 1.5;
     if (threat && threat.t < threatLimit) return false; // A 不满足：附近有弹幕

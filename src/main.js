@@ -18,6 +18,7 @@ import {
   CANVAS, PLAYER_COLORS, ENEMY_COLORS, KEY_BINDINGS, MAZE_TIERS, TIER_POOL_BY_MODE,
   WALL, CELL_SIZE, BULLET, TANK, THEME, ROUND_RESTART_DELAY,
   POWERUP, PICKUP_RATE, MATCH_TARGET, ROUND_INTRO, SLOWMO, STYLE_POOL_BY_MODE, WAVE, UPGRADE,
+  RESERVED_KEYS,
 } from "./config.js";
 import { Player } from "./player.js";
 import { generateMaze, destroyWallsInRadius, destroyWallSegments } from "./maze.js";
@@ -31,7 +32,7 @@ import { castLaserPath, LaserBeam, renderLaserPreview } from "./laser.js";
 import { PowerupSpawner, Powerup, drawPowerupIcon } from "./powerup.js";
 import {
   isJustPressed, endFrame,
-  bindMouse, getMousePos, isClicked, getAnyJustPressed,
+  bindMouse, getMousePos, getClickPos, isClicked, getAnyJustPressed,
 } from "./input.js";
 import {
   renderMenu, renderPauseOverlay, renderHud, renderRoundOverBanner,
@@ -61,7 +62,7 @@ import {
 } from "./upgrades.js";
 import { initAudio, playSfx, toggleMuted, isMuted } from "./audio.js";
 import {
-  loadStats, saveStats, getStats, accuracy, favoriteWeapon,
+  loadStats, saveStats, getStats, accuracy, accuracyDelta, favoriteWeapon,
   recordFired, recordHit, recordKill, recordRoundEnd, recordMatchWin,
 } from "./stats.js";
 
@@ -153,6 +154,9 @@ let waveQuotaLeft = 0;         // 本波还没投放的敌人数（投放即减�
 let waveGapTimer = 0;          // 波间空场喘息（秒）：不冻结，玩家可趁机捡补给/占位
 let waveBest = normalizeWaveBest(loadWaveBest()); // 历史最高 { wave, kills }
 let waveNewRecord = false;     // 本次是否破纪录（结算横幅提示用）
+// 本次开始前**是否已有历史记录**（在覆盖 waveBest 之前抓）。横幅要靠它区分
+// 「破了旧记录」与「这是第一把」——否则全新档的第一次结束必然被判成破纪录。
+let waveHadRecord = false;
 // 本波的过波条件（阶段 27）：普通波 clearQuota、守点波 hold。**只在 beginWave
 // 里赋值一次**——「这是什么波」的决策点只有一处，updateWaveFlow 只负责判它。
 let waveGoal = { type: "clearQuota" };
@@ -181,11 +185,23 @@ let showHelp = false;          // 玩法说明浮窗是否显示（叠在菜单�
 // —— 键位设置面板状态（菜单子状态）——
 // capturing 非空表示等待玩家按下新键；conflictMsg 是面板内的红字提示（限时消失）
 const rebind = { open: false, capturing: null, conflictMsg: "", msgTimer: 0 };
+// 关面板的唯一出口：**提示文案必须一起清**。msgTimer 只在 updateRebind 里递减，
+// 而那个函数只在面板开着时跑，所以关面板时手上那条 2.2s 提示会被冻住——下次打开
+// 面板凭空重播一条陈旧提示。最误导的是「已恢复默认键位」那条（走的是同一对字段）：
+// 它暗示刚刚发生过一次破坏性操作，玩家会去翻自己的自定义键位是不是被清了，
+// 而实际什么都没发生。三条关闭路径（Esc / 点面板外 / 点关闭）共用这一处。
+function closeRebind() {
+  rebind.open = false;
+  rebind.capturing = null;
+  rebind.conflictMsg = "";
+  rebind.msgTimer = 0;
+}
 // 设置浮层开关（命名带 Panel 避免与 settings.js 的导入混淆）
 const settingsPanel = { open: false };
 // 关卡选择浮层开关
 const levelSelect = { open: false };
-const RESERVED_KEYS = ["Escape", "F11"]; // 系统语义键，禁止绑定（Esc=暂停/取消，F11=全屏）
+// 键位黑名单迁到 config.js（RESERVED_KEYS）：settings.js 的加载过滤也要读它，
+// 留在这里会成环（settings 不能 import main）。表里现在含界面快捷键，见那边的注释。
 
 // 开发自检钩子（CDP 驱动验证用，见 CLAUDE.md「开发自检」）：
 // 模块闭包外唯一的状态窥视口。只读快照 + 强设比分（快进局胜流转测试），
@@ -216,6 +232,25 @@ window.__devHook = {
   skipCountdown: () => { introTimer = 0; },
   introLeft: () => introTimer,
   slowmoLeft: () => slowmoTimer,
+  // 最近一条激光亮线的折线顶点（只读）。阶段 28.3 的「所见即所打」要在实机
+  // 比对**屏幕上那条预瞄虚线**与**实际打出去的射线**是否逐点重合，而亮线在
+  // effects 里、CDP 摸不到。纯函数探针已钉死几何，这个口子补的是「接线是否
+  // 真的把钳位后的出膛点传到了两边」——那是只有跑起来才能证伪的部分。
+  // 照 enemySlots()/fieldCount().foeBullets 的先例：只读、不进正常交互路径
+  lastBeam: () => {
+    for (let i = effects.length - 1; i >= 0; i--) {
+      if (effects[i] instanceof LaserBeam) return effects[i].points.map((p) => ({ x: p.x, y: p.y }));
+    }
+    return null;
+  },
+  // 预瞄虚线用的那份路径：与 renderLaserPreview 内部逐字同源（同一个
+  // muzzlePoint(walls) + 同一个 castLaserPath），供比对实际亮线
+  previewPath: (i) => {
+    const t = players[i]?.tank;
+    if (!t || !maze) return null;
+    const m = t.muzzlePoint(maze.walls);
+    return castLaserPath(m.x, m.y, m.angle, maze.walls).map((p) => ({ x: p.x, y: p.y }));
+  },
   statsSnapshot: () => JSON.parse(JSON.stringify(getStats())),
   levelState: () => ({
     index: currentLevelIndex, progress: challengeProgress, outcome: levelOutcome,
@@ -384,6 +419,14 @@ function setupRound(mode) {
   powerups = [];
   mines = [];
   resetShake();      // 上一局的余震不许漏进新一局的开场（见 effects.js 里的理由）
+  // 上一局的击杀慢镜同理（与 resetShake 同族的转场残留，阶段 27.1 漏了这一个）：
+  // loop() 按 slowmoTimer>0 缩放 gameDt，而 introTimer 吃的就是 gameDt，于是
+  // 「击杀后 0.55s 内按 R 重开」会让新一局的 3-2-1 用 0.35× 速度走——实测整段
+  // 1.35s→1.71s、第一拍从 0.45s 拖到 0.80s（换拍音可听地不齐）。
+  // 五条重开路径全部汇入 setupRound，所以清在这一处即全覆盖；**刻意不在
+  // remapWaveArena 里重复**——波次中途的非终局击杀只置 pendingSoloSlowmo 从不置
+  // slowmoTimer，终局击杀直接进 WAVE_OVER 结束这一 run，故换图时它恒为 0，加了是死代码。
+  slowmoTimer = 0;
   holdZone = null;   // 上一次波次 run 的圈不许漏进新一局（beginWave 随后会按波号重建）
   // 抽卡浮层清在**所有模式**共用的这一段而不是 wave 分支里：`updatePlaying` 顶上那道
   // 抽卡门不分模式，万一 open 漏进 pvp 就是最常玩的模式整局冻死。现在的流程漏不出来
@@ -460,8 +503,10 @@ function updateMenu(dt) {
     return;
   }
 
+  // 命中检测一律用 getClickPos() 而不是 getMousePos()：后者是实时 hover，会被
+  // 「click 之后、本帧消费之前」到达的 mousemove 推走，于是点 A 执行 B（见 input.js）
   if (!isClicked()) return;
-  const { x: mx, y: my } = getMousePos();
+  const { x: mx, y: my } = getClickPos();
   const action = menuAction(mx, my, { showHelp });
   if (!action) return;
 
@@ -492,7 +537,7 @@ function updateLevelSelect() {
     return;
   }
   if (!isClicked()) return;
-  const { x: mx, y: my } = getMousePos();
+  const { x: mx, y: my } = getClickPos();
   const action = levelSelectAction(mx, my, challengeProgress);
   if (!action) return;
   playSfx("uiClick");
@@ -513,7 +558,7 @@ function updateSettingsPanel() {
     return;
   }
   if (!isClicked()) return;
-  const { x: mx, y: my } = getMousePos();
+  const { x: mx, y: my } = getClickPos();
   const action = settingsAction(mx, my);
   if (!action) return;
 
@@ -567,7 +612,9 @@ function updateRebind(dt) {
       if (code === "Escape") {
         rebind.capturing = null; // 仅取消捕获，不关面板
       } else if (RESERVED_KEYS.includes(code)) {
-        flash(`${keyLabel(code)} 是系统保留键，不能绑定`);
+        // 文案要说清是「界面」而不是笼统的「系统」——表里现在两类都有，
+        // 而玩家真正会撞上的是 R（紧邻 WASD/ESDF 手位，所以它才会被绑）
+        flash(`${keyLabel(code)} 是界面快捷键，不能绑定`);
         rebind.capturing = null;
       } else if (code === KEY_BINDINGS[player][action]) {
         rebind.capturing = null; // 绑回原键，无事发生
@@ -587,13 +634,13 @@ function updateRebind(dt) {
     }
   } else if (isJustPressed("Escape")) {
     // 2) 非捕获态 Esc：关闭面板
-    rebind.open = false;
+    closeRebind();
     return;
   }
 
   // 3) 鼠标点击：chip 进入/切换捕获，恢复默认，面板外关闭
   if (!isClicked()) return;
-  const { x: mx, y: my } = getMousePos();
+  const { x: mx, y: my } = getClickPos();
   const action = rebindAction(mx, my);
   if (!action) return;
 
@@ -605,8 +652,7 @@ function updateRebind(dt) {
     flash("已恢复默认键位", false); // 成功提示不播错误音
     playSfx("uiClick");
   } else if (action.type === "close") {
-    rebind.open = false;
-    rebind.capturing = null;
+    closeRebind();
   }
 }
 
@@ -634,7 +680,7 @@ function hitPlayer(p, weapon, killerTank) {
     effects.push(new ShieldBreak(p.tank.x, p.tank.y, THEME.shieldRing));
     addShake(3, 0.2);
     playSfx("shieldBreak");
-    if (!soloMode() && killerIndex >= 0 && killerTank !== p.tank) recordHit(killerIndex);
+    if (!soloMode() && killerIndex >= 0 && killerTank !== p.tank) recordHit(killerIndex, weapon);
     return false;
   }
   p.tank.alive = false;
@@ -902,8 +948,10 @@ function updatePlaying(dt) {
 // 激光发射结算（瞬时 hitscan，当帧一次完成）：投射折线路径 → 沿路径找
 // 「最早」被扫到的坦克（逐段推进，段内按参数排序）→ 命中处理（有盾消盾
 // 挡住射线，无盾即死）→ 路径截断到命中点（视觉上射线止于目标/护盾）。
-// origin = tank.muzzlePoint()；首段起点在炮口外、朝前发射，几何上不会
-// 打中发射者自己；反弹段扫回来则可以自杀——与子弹跳弹手感一致。
+// origin = tank.muzzlePoint(walls)：贴墙时出膛点被钳回墙内侧，可能落在射手
+// 自己的车体圆内（车贴墙时墙面恰好在车体半径上，出膛点不可能既在体外又在
+// 墙内），所以首段必须显式跳过射手——否则每发贴墙激光原地自杀。
+// 反弹段照旧参与判定，扫回来可以自杀——与子弹跳弹手感一致。
 function fireLaser(origin, shooter = null) {
   let pts = castLaserPath(origin.x, origin.y, origin.angle, maze.walls);
 
@@ -917,6 +965,7 @@ function fireLaser(origin, shooter = null) {
     let hit = null;
     for (const p of players) {
       if (!p.alive) continue;
+      if (i === 0 && shooter && p === shooter) continue; // 首段跳过射手（见上）
       const cp = closestPointOnSegment(p.tank.x, p.tank.y, a.x, a.y, b.x, b.y);
       if (Math.hypot(p.tank.x - cp.x, p.tank.y - cp.y) > TANK.radius) continue;
       const t = Math.hypot(cp.x - a.x, cp.y - a.y) / segLen;
@@ -947,7 +996,7 @@ function updatePaused() {
   }
 
   if (!isClicked()) return;
-  const { x: mx, y: my } = getMousePos();
+  const { x: mx, y: my } = getClickPos();
   const action = pauseAction(mx, my);
   if (action) playSfx("uiClick");
   if (action === "resume") {
@@ -978,7 +1027,8 @@ function updateMatchOver(dt) {
   if (isJustPressed("KeyR")) choice = "rematch";
   else if (isJustPressed("Escape")) choice = "menu";
   else if (isClicked()) {
-    choice = matchOverAction(getMousePos().x, getMousePos().y);
+    const c = getClickPos();
+    choice = matchOverAction(c.x, c.y);
     if (choice) playSfx("uiClick");
   }
 
@@ -996,7 +1046,8 @@ function updateLevelOver(dt) {
   if (isJustPressed("KeyR")) choice = "retry";
   else if (isJustPressed("Escape")) choice = "menu";
   else if (isClicked()) {
-    choice = levelOverAction(getMousePos().x, getMousePos().y, { win: levelOutcome === "win", hasNext });
+    const c = getClickPos();
+    choice = levelOverAction(c.x, c.y, { win: levelOutcome === "win", hasNext });
     if (choice) playSfx("uiClick");
   }
 
@@ -1030,12 +1081,27 @@ function beginWave(n) {
   waveQuotaLeft = waveGoal.type === "hold" ? Infinity : spec.quota;
   waveGapTimer = 0;
   if (shouldRemap(n)) remapWaveArena();   // 章节换图（内含 3-2-1 冻结）
-  else if (n > 1) playSfx("countTick");   // 新一波来袭的轻提示
+  // 新一波来袭的轻提示。**两条平行 if 而不是 else if**：换图那条路也要响这第一声，
+  // 它是「操作权被拿走了」的唯一听觉起点——喘息期不冻结（玩家正在跑动捡补给），
+  // 直接切进冻结的 3-2-1 却全程静默，第一声反馈要等 0.45s 才到。不会双响：
+  // shouldRemap(1) 恒假，所以 setupRound 那条路走不进 remap 分支，与 401 行不叠；
+  // 即便将来叠上，audio.js 的同名 50ms 限流也会把同帧两声合并。
+  if (n > 1) playSfx("countTick");
   // 圈必须在换图之后挑（remapWaveArena 会换一张新图、还可能换档位），否则
   // 旧坐标落到新图的墙里或图外。普通波恒清 null——不清就会把上一波的圈留在场上。
   holdZone = waveGoal.type === "hold"
     ? makeHoldZone(waveGoal.secs)
     : null;
+  // **挑不出圈就退回普通清场波**（守点波的唯一死局出口）。pickZoneSpot 声称永不返
+  // null，但它确实有一条 return null（整张图没有一格塞得下车）；一旦命中，这一波就是
+  // hold 目标 + quotaLeft=Infinity + 没有圈可站 ⇒ holdSecs 恒 0、evaluate 永不返 win、
+  // 敌人无限补 = 真死局，且 HUD 会走 default 模板印出「敌 ×2+Infinity」。
+  // 宁可把这一波降级成打光敌人（可完成），也不要一个过不去的波——与 maze.js
+  // 「宁空旷勿无图」同一条取舍。
+  if (waveGoal.type === "hold" && !holdZone) {
+    waveGoal = { type: "clearQuota" };
+    waveQuotaLeft = spec.quota;
+  }
   // 开波补给：强制刷 supplyCountOf 个（基础 spec.supply + 「补给增量」卡的层数）。
   // **场上上限必须一起抬**（spawner.cap）——不然多刷的补给会被 forceSpawn 的
   // 「场上已满」那道门静默吃掉，那张卡就是一张空卡。算式与 arena 共用同一份出口。
@@ -1124,13 +1190,20 @@ function updateWaveFlow(dt) {
       pendingSoloSlowmo = false;
     }
     const rec = { wave: waveNo, kills: waveKills };
+    // **先记住「之前有没有记录」再覆盖它**。少了这一笔，横幅第三条文案
+    // 「首战告负，再来一把」在构造上永远显示不出来：它要求 newRecord===false
+    // 且 best.wave===0，而 best.wave===0 只在全新档成立，那时任何一次结束都
+    // wave>=1>0 ⇒ newRecord 必为 true，两个条件互斥。症状是第一次玩死在第 1 波
+    // 也报「🏆 新纪录！」+ 胜利琶音——给「立刻就死」发奖杯。
+    waveHadRecord = waveBest.wave > 0;
     waveNewRecord = isBetterRecord(rec, waveBest);
     if (waveNewRecord) {
       waveBest = normalizeWaveBest(rec);
-      saveWaveBest(waveBest);
+      saveWaveBest(waveBest);   // 记录照旧落盘（首战也存），只是不吹号
     }
     state = STATE.WAVE_OVER;
-    playSfx(waveNewRecord ? "matchWin" : "roundDraw");
+    // 奖杯与琶音只给「打破了一个真的存在过的记录」；首战一律中性收场音
+    playSfx(waveNewRecord && waveHadRecord ? "matchWin" : "roundDraw");
     return;
   }
   pendingSoloSlowmo = false; // 打掉敌人是波次里的日常，一局几十个，不给慢镜
@@ -1201,13 +1274,21 @@ function openDraft() {
 // 抽卡浮层的每帧输入（冻结期唯一活着的交互）。两条路等价：数字键 1/2/3 与点击。
 function updateDraft() {
   const mouse = getMousePos();
-  const hit = draftAction(mouse.x, mouse.y, draft.offers.length);
-  draft.hover = hit ? hit.index : -1;
+  const hovered = draftAction(mouse.x, mouse.y, draft.offers.length);
+  draft.hover = hovered ? hovered.index : -1;
 
   for (let i = 0; i < draft.offers.length; i++) {
     if (isJustPressed(`Digit${i + 1}`)) { applyDraftPick(i); return; }
   }
-  if (isClicked() && hit) applyDraftPick(hit.index);
+  // 点击命中按**点击当时**的坐标重算，不复用上面那个 hover 命中：click 之后、本帧
+  // 消费之前还会来 mousemove，hover 可能已经漂到隔壁那张卡上了。
+  // 选卡是不可撤销的（当场施加到坦克上，浮层也没有关闭出口），误选的代价最高——
+  // 这一处是整个游戏里最该按点击坐标判的地方
+  if (isClicked()) {
+    const c = getClickPos();
+    const picked = draftAction(c.x, c.y, draft.offers.length);
+    if (picked) applyDraftPick(picked.index);
+  }
 }
 
 // 选定一张：施加 → 收浮层 → 进喘息（下一帧调度器落进现成的喘息分支）
@@ -1233,7 +1314,8 @@ function updateWaveOver(dt) {
   if (isJustPressed("KeyR")) choice = "retry";
   else if (isJustPressed("Escape")) choice = "menu";
   else if (isClicked()) {
-    choice = waveOverAction(getMousePos().x, getMousePos().y);
+    const c = getClickPos();
+    choice = waveOverAction(c.x, c.y);
     if (choice) playSfx("uiClick");
   }
 
@@ -1314,12 +1396,12 @@ function render() {
       renderArena();
       renderMatchOverBanner(ctx, {
         winner, matchScores, players, mouse: getMousePos(),
-        // 本场命中率（对基线做差；无基线或没开过火显示跳过）
+        // 本场命中率（对基线做差；无基线或没开过火显示跳过）。
+        // 算式与钳位都收在 stats.accuracyDelta 一处——原先这里是内联的一份，
+        // 与 stats.accuracy 的钳位不同步，于是同一个游戏里「终身 ≤100%」而
+        // 「本场 200%」。地雷口径见 stats.js 头部。
         matchAccuracy: matchStatsBase
-          ? getStats().players.map((p, i) => {
-              const fired = p.fired - matchStatsBase[i].fired;
-              return fired > 0 ? (p.hits - matchStatsBase[i].hits) / fired : null;
-            })
+          ? getStats().players.map((p, i) => accuracyDelta(p, matchStatsBase[i]))
           : [null, null],
       });
       break;
@@ -1336,7 +1418,9 @@ function render() {
       renderArena();
       renderWaveOverBanner(ctx, {
         wave: waveNo, kills: waveKills, best: waveBest,
-        newRecord: waveNewRecord, mouse: getMousePos(),
+        // newRecord 单独一条不够：waveBest 此刻已经被本次成绩覆盖了，横幅无从
+        // 分辨「破了旧记录」与「这是第一把、本来就没有记录」，见 updateWaveFlow
+        newRecord: waveNewRecord, hadRecord: waveHadRecord, mouse: getMousePos(),
       });
       break;
   }

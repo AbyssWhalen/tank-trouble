@@ -8,7 +8,9 @@
 // 恢复默认用模块加载时的深拷贝快照（在任何覆写发生之前抓取）。
 //
 // schema（版本号防未来结构变更时读坏旧数据；字段各自宽松校验，
-// 缺失/非法的字段落默认——老存档天然向前兼容）：
+// 缺失/非法的字段落默认——老存档天然向前兼容。**例外是 bindings**：它是一张
+// 有内部约束的表（跨玩家不许重键），逐字段落默认会合出单字段合法、整套失灵的
+// 结果，所以它整套一起验、不自洽就整套落默认，见 initSettings）：
 //   localStorage["tank-trouble.settings.v1"] = {
 //     version: 1,
 //     bindings: [{forward,back,left,right,fire,special} × 2],
@@ -20,7 +22,7 @@
 //   }
 // ============================================================
 
-import { KEY_BINDINGS, POWERUP } from "./config.js";
+import { KEY_BINDINGS, POWERUP, RESERVED_KEYS } from "./config.js";
 
 const STORE_KEY = "tank-trouble.settings.v1";
 const ACTIONS = ["forward", "back", "left", "right", "fire", "special"];
@@ -54,19 +56,60 @@ function writeStore(patch) {
   }
 }
 
+// 一套键位（前两套玩家共 12 个动作）是否可用：字段齐全、不含黑名单键、跨玩家零重复。
+// 判据与改键面板的 findBindingConflict 同源——它扫的也是两套玩家的全部动作，
+// 加载期和捕获期必须用同一把尺子，否则「面板里绑不上的组合」能从存档里绕进来。
+function isBindingSetSane(sets) {
+  const codes = [];
+  for (const b of sets) {
+    for (const a of ACTIONS) {
+      const c = b[a];
+      if (typeof c !== "string" || !c) return false;
+      if (RESERVED_KEYS.includes(c)) return false;
+      codes.push(c);
+    }
+  }
+  return new Set(codes).size === codes.length;
+}
+
 // 启动时调用一次：有合法存档则覆写前两套键位（后两套 3p/4p 预留不动）。
-// 逐字段校验：老存档缺 special 等新字段时，对应键位保持默认。
+//
+// **整套一起校验，不是逐字段**。逐字段「非法落默认」会合出一张每个字段单独合法、
+// 合起来却是坏的表，而且坏得完全看不出来：
+//   · 前进存的是 KeyR（黑名单）→ 落回默认 KeyW，而后退存的就是 KeyW
+//     ⇒ 按 W 时 readControls 算出 move = +1 −1 = 0，车一动不动、没有任何提示
+//   · 老存档没有 special 字段 → special 落默认 KeyE，而开火存的是 KeyE ⇒ 同形
+// 两种都只砸在「改过键的老玩家」头上，新建存档怎么测都测不出来。
+// 所以这里先把存档合成一张候选表，再按「跨两套玩家不许重键」验一次：
+// 整套自洽才装；不自洽就整套落默认——默认表天然自洽，且玩家一眼看得见、能重改，
+// 比「某一个动作静默失灵」好得多（这是本文件「非法落默认」纪律的整套版，不是例外）。
 export function initSettings() {
   const data = readStore();
   if (!data || !Array.isArray(data.bindings)) return;
+
+  // 候选表：默认打底 + 存档里「非空字符串且不在黑名单」的字段
+  const cand = DEFAULT_BINDINGS.slice(0, 2).map((d) => ({ ...d }));
   data.bindings.slice(0, 2).forEach((saved, i) => {
     if (!saved || typeof saved !== "object") return;
     for (const a of ACTIONS) {
-      if (typeof saved[a] === "string" && saved[a]) {
-        KEY_BINDINGS[i][a] = saved[a];
-      }
+      if (typeof saved[a] !== "string" || !saved[a]) continue;
+      // 黑名单键落默认而不是照收：黑名单原先只在改键面板的**捕获**处生效，
+      // 于是在它扩容之前就把移动键绑成 KeyR 的存档，重启后照旧把 R 装回去——
+      // 而结算横幅上点一下那个键就会静默清零整场比分。存量存档的洞必须在
+      // 加载期闭合，否则唯一会踩到的那批人（改过键的）永远修不好。
+      if (RESERVED_KEYS.includes(saved[a])) continue;
+      cand[i][a] = saved[a];
     }
   });
+
+  if (!isBindingSetSane(cand)) {
+    // 整套落默认并显式写回全局表（不是 return 了事）：这样 initSettings 的后置条件
+    // 无条件成立——「调用之后前两套键位一定是一张自洽的表」，与调用前的状态无关。
+    DEFAULT_BINDINGS.slice(0, 2).forEach((d, i) => Object.assign(KEY_BINDINGS[i], d));
+    console.warn("settings: 键位存档整套不自洽（重键/缺字段），已恢复默认键位");
+    return;
+  }
+  cand.forEach((b, i) => Object.assign(KEY_BINDINGS[i], b));
 }
 
 // 每次成功改键/恢复默认后调用，把当前前两套键位写盘

@@ -15,7 +15,7 @@ import { castLaserPath } from "../src/laser.js";
 import { generateMaze, destroyWallsInRadius, destroyWallSegments } from "../src/maze.js";
 import { AiController, findBounceShot } from "../src/ai.js";
 import { closestPointOnSegment, resolveCircleWalls } from "../src/collision.js";
-import { POWERUP, TANK, KEY_BINDINGS, BULLET, CELL_SIZE, SFX, PICKUP_RATE, MATCH_TARGET, MAZE_TIERS, MAZE_STYLES, WALL, MAZE_FLOOR } from "../src/config.js";
+import { POWERUP, TANK, KEY_BINDINGS, BULLET, CELL_SIZE, SFX, PICKUP_RATE, MATCH_TARGET, MAZE_TIERS, MAZE_STYLES, WALL, MAZE_FLOOR, RESERVED_KEYS, UPGRADE, CANVAS } from "../src/config.js";
 
 let pass = 0;
 let fail = 0;
@@ -42,6 +42,22 @@ section("键位表");
     (b) => ["forward", "back", "left", "right", "fire", "special"].every((a) => typeof b[a] === "string")
   ));
   check("键位无重复", new Set(allCodes).size === allCodes.length);
+
+  // —— 界面快捷键黑名单（本次审查修的缺陷）——
+  // 原先 RESERVED_KEYS 只有 Esc+F11（「系统语义键」），漏掉了游戏自己在状态机里
+  // 硬编码消费的键。KeyR 是四个终局态的「重开」：把移动键绑到 R，结算横幅一出来
+  // 手上再点一下前进，刚打完的整场大比分就静默清零重开。
+  check("黑名单含四个终局态的重开键 KeyR", RESERVED_KEYS.includes("KeyR"));
+  check("黑名单含系统键 Esc/F11", ["Escape", "F11"].every((k) => RESERVED_KEYS.includes(k)));
+  // 抽卡浮层的消费处是 `isJustPressed(\`Digit${i+1}\`)`（模板串，grep 搜不到），
+  // 上界是 draft.offers.length ⇐ UPGRADE.offers。**这条断言就是那个联动本身**：
+  // 把 offers 调到 4 而黑名单写死三个的话，第 4 张卡的数字键会静默脱钩。
+  const draftKeys = Array.from({ length: UPGRADE.offers }, (_, i) => `Digit${i + 1}`);
+  check(`黑名单覆盖全部抽卡数字键（offers=${UPGRADE.offers}）`,
+    draftKeys.every((k) => RESERVED_KEYS.includes(k)), draftKeys.join(","));
+  // 默认键位本身不许撞黑名单（撞了就是出厂即坏）
+  check("默认四套键位都不在黑名单里",
+    !allCodes.some((c) => RESERVED_KEYS.includes(c)));
 }
 
 // ============================================================
@@ -227,6 +243,39 @@ section("AI 激光 hitscan 开火判定");
     ai.fireTimer = -1;
     const c = ai.update(1 / 60, mkWorld(bot, enemy));
     check("背对敌人不开火", c.fire === false);
+  }
+
+  // —— 阶段 28.3：弹药预算不该拦激光 ——
+  // 激光是 hitscan，不产生实体弹也不占 maxAlive（tank.js 的限流对持激光者
+  // 整段跳过），所以「自留弹预算」那套立论对它一条都不成立。焊在一起时
+  // 「场上自弹占满预算」会让那唯一一发必中激光也开不出来。
+  {
+    const bot = mkP(new Tank(100, 100, 0, "#222"));
+    const enemy = mkP(new Tank(400, 100, Math.PI, "#111"));
+    const ai = new AiController(bot, "normal");
+    bot.tank.applyPowerup("laser");
+    ai.fireTimer = -1;
+    // 场上塞满自己的普通弹（非 scatter 才计入预算），把弹药门顶死
+    const world = mkWorld(bot, enemy);
+    for (let i = 0; i < BULLET.maxAlive + 2; i++) {
+      world.bullets.push({ dead: false, owner: bot.tank, kind: "bullet", x: 900, y: 900, vx: 0, vy: 0 });
+    }
+    const c = ai.update(1 / 60, world);
+    check("弹药预算占满时激光照开（激光不占 maxAlive）", c.fire === true,
+      `场上自弹 ${world.bullets.length} 发 vs maxAlive ${BULLET.maxAlive}`);
+  }
+  // 对照：同样占满预算，持普通弹时必须**不**开火（弹药门对普通弹照旧生效）
+  {
+    const bot = mkP(new Tank(100, 100, 0, "#222"));
+    const enemy = mkP(new Tank(400, 100, Math.PI, "#111"));
+    const ai = new AiController(bot, "normal");
+    ai.fireTimer = -1; // 不发激光，纯普通弹
+    const world = mkWorld(bot, enemy);
+    for (let i = 0; i < BULLET.maxAlive + 2; i++) {
+      world.bullets.push({ dead: false, owner: bot.tank, kind: "bullet", x: 900, y: 900, vx: 0, vy: 0 });
+    }
+    const c = ai.update(1 / 60, world);
+    check("对照：普通弹仍受弹药预算约束（只给激光开的口子）", c.fire === false);
   }
 }
 
@@ -560,6 +609,136 @@ section("子弹磨墙 (bullet erode)");
 }
 
 // ============================================================
+section("离散碰撞与出膛钳位 (阶段 28.3)");
+{
+  // —— ① 子弹分步：60fps 下位移 3px < 弹径 6px 不穿墙，但 main.js 的 dt
+  // 钳位上界 0.05s（20fps）对应 9px > 6px——**钳位本身是触发源**。
+  // DT_CLAMP 与 main.js:432 的 Math.min(..., 0.05) 是同一个数，改那边要改这里
+  const DT_CLAMP = 0.05;
+  const perFrame60 = BULLET.speed / 60;
+  const perFrameClamp = BULLET.speed * DT_CLAMP;
+  check("60fps 下单步位移小于弹径（正常帧率本就不穿墙）",
+    perFrame60 < BULLET.radius * 2,
+    `${perFrame60.toFixed(1)}px < 弹径 ${BULLET.radius * 2}px`);
+  check("dt 钳位上界处位移超过弹径（分步的前提成立，钳位即触发源）",
+    perFrameClamp > BULLET.radius * 2,
+    `dt=${DT_CLAMP}s → ${perFrameClamp.toFixed(1)}px > 弹径 ${BULLET.radius * 2}px`);
+
+  // 构造那个相位：出发点距墙 4px（落在 3~6px 的穿墙窗口内）。
+  // 整步走 9px 会落到墙后 5px——两端都不与墙重叠，中间从未采样 = 穿墙。
+  // stepMove 是修复前的行为（单步），update 是修复后（分步），同一发子弹对照。
+  {
+    const WALLX = 300;
+    const mkWall = () => [{ x1: WALLX, y1: -200, x2: WALLX, y2: 200, border: true }];
+    // 修复前：直接调 stepMove 走整步
+    const bOld = new Bullet(WALLX - 4, 0, BULLET.speed, 0, null);
+    bOld.stepMove(DT_CLAMP, mkWall(), false);
+    check("整步走会相位穿墙（修复前的病，用 stepMove 复现）",
+      bOld.x > WALLX && bOld.vx > 0,
+      `x=${bOld.x.toFixed(1)} > 墙 ${WALLX} 且 vx=${bOld.vx.toFixed(0)} 未反弹`);
+
+    // 修复后：同样的 dt 走 update，分步把它拦住
+    const bNew = new Bullet(WALLX - 4, 0, BULLET.speed, 0, null);
+    bNew.update(DT_CLAMP, mkWall(), false);
+    check("分步后同一相位被拦住并反弹（修复生效）",
+      bNew.vx < 0 && bNew.x <= WALLX,
+      `x=${bNew.x.toFixed(1)} vx=${bNew.vx.toFixed(0)}`);
+
+    // 相位扫描：单个相位过不代表全过——子步长取错（>radius）时，
+    // 一部分相位会「跨到墙背面被采到→法线反向→二次反弹回原方向」，
+    // 净效果是撞墙不减速穿过去。扫遍 0.1px 精度的全部出发距离。
+    //
+    // 判据是**否命题**「不许停在墙背面且仍朝墙飞」，不是「必须已反弹」：
+    // 还没够着墙的相位本来就不该反弹（circleVsSegment 用 distSq >= r*r，
+    // 距离恰好等于弹径算「没碰到」），要求它反弹会把正确行为判成错。
+    let swept = 0, tunneled = [];
+    for (let d = 0.1; d <= perFrameClamp + BULLET.radius * 2; d += 0.1) {
+      const bs = new Bullet(WALLX - d, 0, BULLET.speed, 0, null);
+      bs.update(DT_CLAMP, mkWall(), false);
+      swept++;
+      if (bs.x > WALLX && bs.vx > 0) tunneled.push(`d=${d.toFixed(1)}→x=${bs.x.toFixed(1)}`);
+    }
+    check("相位扫描：钳位 dt 下无任何相位穿到墙背面",
+      tunneled.length === 0,
+      `扫 ${swept} 个相位，穿墙 ${tunneled.length}${tunneled.length ? " 例: " + tunneled.slice(0, 3).join(" ") : ""}`);
+
+    // 同一扫描对整步走（修复前）必须**大面积**红——否则这条护栏在测空气
+    let oldTunneled = 0;
+    for (let d = 0.1; d <= perFrameClamp + BULLET.radius * 2; d += 0.1) {
+      const bs = new Bullet(WALLX - d, 0, BULLET.speed, 0, null);
+      bs.stepMove(DT_CLAMP, mkWall(), false);
+      if (bs.x > WALLX && bs.vx > 0) oldTunneled++;
+    }
+    check("反证：整步走在同一扫描下确实大量穿墙（护栏不是在测空气）",
+      oldTunneled > 20, `整步走穿墙 ${oldTunneled} 个相位`);
+  }
+
+  // 分步不改变正常帧率下的物理：60fps 恒为单步，arena 固定 dt 跑分逐字节不变
+  {
+    const WALLX = 300;
+    const walls = [{ x1: WALLX, y1: -200, x2: WALLX, y2: 200, border: true }];
+    const b = new Bullet(100, 0, BULLET.speed, 0, null);
+    const steps = Math.max(1, Math.ceil((BULLET.speed / 60) / BULLET.radius));
+    check("60fps 恒为单步（正常帧零额外开销、跑分逐字节不变）", steps === 1, `steps=${steps}`);
+    // 200px 距离 / 3px 每帧 ≈ 67 帧才够走到墙，给 100 帧留余量
+    for (let i = 0; i < 100; i++) b.update(1 / 60, walls, false);
+    check("正常帧率下照旧反弹（分步是细化不是改物理）",
+      b.vx < 0 && b.x < WALLX,
+      `x=${b.x.toFixed(1)} vx=${b.vx.toFixed(0)}`);
+  }
+
+  // —— ② 出膛钳位：炮口伸出 > 车体半径，贴墙时越到墙背面 = 隔墙杀 ——
+  const muzzleReach = TANK.bodyLength / 2 + TANK.barrelLength + BULLET.radius + 2;
+  check("炮口伸出确实超过车体半径（钳位的前提成立）",
+    muzzleReach > TANK.radius,
+    `炮口 ${muzzleReach}px > 车体 ${TANK.radius}px`);
+
+  {
+    const WALLX = 200;
+    const walls = [{ x1: WALLX, y1: 0, x2: WALLX, y2: 400, hp: 5 }];
+    const t = new Tank(WALLX - TANK.radius, 200, 0, "#1ba39c"); // 朝右正顶墙
+    const raw = t.muzzlePoint();
+    const clamped = t.muzzlePoint(walls);
+
+    check("不传 walls 时贴墙炮口越到墙背面（钳位前的病）",
+      raw.x > WALLX, `x=${raw.x.toFixed(1)} 墙在 ${WALLX}`);
+    check("传 walls 时出膛点被钳回墙内侧",
+      clamped.x < WALLX, `x=${clamped.x.toFixed(1)} < ${WALLX}`);
+
+    // 钳回后出膛点落在射手车体圆内——这正是 fireLaser 必须跳过首段射手的理由
+    const dSelf = Math.hypot(clamped.x - t.x, clamped.y - t.y);
+    check("钳位后出膛点落在射手车体圆内（首段必须跳过射手）",
+      dSelf < TANK.radius, `到车心 ${dSelf.toFixed(1)}px < 半径 ${TANK.radius}px`);
+
+    // 反弹段仍扫回射手：贴墙开激光照旧自杀，与子弹「怼墙开炮弹回来」一致
+    const pts = castLaserPath(clamped.x, clamped.y, clamped.angle, walls);
+    const bounceSweepsSelf = pts.length > 2 && pts[2].x < t.x && t.x < pts[1].x;
+    check("反弹段照旧扫回射手（贴墙开激光仍会自杀，对齐子弹手感)",
+      bounceSweepsSelf, `pts[1].x=${pts[1]?.x.toFixed(1)} pts[2].x=${pts[2]?.x.toFixed(1)} 车心=${t.x}`);
+
+    // 远离墙时钳位是空操作——旧调用点语义逐字节不变
+    const far = new Tank(50, 200, 0, "#1ba39c");
+    const fRaw = far.muzzlePoint();
+    const fClamp = far.muzzlePoint(walls);
+    check("远离墙时钳位是空操作（旧调用点语义不变）",
+      fRaw.x === fClamp.x && fRaw.y === fClamp.y && fRaw.angle === fClamp.angle,
+      `${fRaw.x.toFixed(2)} === ${fClamp.x.toFixed(2)}`);
+  }
+
+  // —— ③ tryFire 的激光分支必须消费钳位后的出膛点（与预瞄同源）——
+  {
+    const WALLX = 200;
+    const walls = [{ x1: WALLX, y1: 0, x2: WALLX, y2: 400, hp: 5 }];
+    const t = new Tank(WALLX - TANK.radius, 200, 0, "#1ba39c");
+    t.applyPowerup("laser");
+    const res = t.tryFire([], true, walls);
+    check("tryFire 激光出膛点已钳位（所见即所打）",
+      res.laser !== null && res.laser.x < WALLX,
+      `laser.x=${res.laser?.x.toFixed(1)} 墙在 ${WALLX}`);
+  }
+}
+
+// ============================================================
 section("音效 spec 表 (SFX/PICKUP_RATE)");
 {
   // audio.js 是浏览器专属（Web Audio），smoke 只验 config 里的纯数据表：
@@ -851,7 +1030,7 @@ section("胜负条件 (objectives)");
 section("关卡表与过关判定 (levels)");
 {
   const { LEVELS, LEVEL_COUNT, evaluateObjective, normalizeProgress } = await import("../src/levels.js");
-  const { MAZE_STYLES, AI_DIFFICULTY } = await import("../src/config.js");
+  const { MAZE_STYLES, AI_DIFFICULTY, PLAYER_COLORS } = await import("../src/config.js");
 
   {
     const idsOk = LEVELS.every((l, i) => l.id === i + 1);
@@ -866,6 +1045,18 @@ section("关卡表与过关判定 (levels)");
       (l.objective !== "eliminateTimed" || l.mutators.timeLimit > 0));
     check("关卡表结构不变量（id/tier/style/敌人/道具/目标/mutator）",
       idsOk && tiersOk && enemiesOk && powupsOk && objOk && mutOk, `共 ${LEVEL_COUNT} 关`);
+  }
+  {
+    // 配色不撞玩家：`setupRound` 的关卡分支给敌人发 `PLAYER_COLORS[(i+1) % 4]`。
+    // 关卡照旧用玩家表（阶段 28 明确不换挑战关配色，`ENEMY_COLORS` 前三位与
+    // `PLAYER_COLORS[1..3]` 逐字节相同，所以现状渲染两者等价），但那个 `%` 意味着
+    // **第 4 个敌人会拿到 0 号 = 玩家的青绿**，屏幕上分不出哪辆是自己。
+    // 现在关卡表最多 3 个敌人所以够用，这条门是给「以后有人加第 4 个敌人」留的：
+    // 与其改一处现在没病的代码，不如让越界那一刻有个说得清原因的红。
+    const maxFoes = Math.max(...LEVELS.map((l) => l.enemies.length));
+    check("关卡敌人数不会让配色回绕撞上玩家色",
+      maxFoes + 1 <= PLAYER_COLORS.length,
+      `最多 ${maxFoes} 敌 + 玩家 vs ${PLAYER_COLORS.length} 色`);
   }
   {
     const elim = { objective: "eliminate", mutators: {} };
@@ -904,7 +1095,10 @@ section("关卡表与过关判定 (levels)");
 // ============================================================
 section("战绩统计 (stats 纯函数)");
 {
-  const { normalizeStats, accuracy, favoriteWeapon, updateStreak } = await import("../src/stats.js");
+  const {
+    normalizeStats, accuracy, accuracyDelta, favoriteWeapon, updateStreak,
+    FIRED_WEAPONS, DEPLOY_WEAPONS, recordFired, recordKill, recordHit, getStats,
+  } = await import("../src/stats.js");
 
   {
     const s = normalizeStats(null);
@@ -935,6 +1129,98 @@ section("战绩统计 (stats 纯函数)");
     s = updateStreak(2, 5, null);
     check("同归于尽连胜不动", s.curStreak === 2 && s.bestStreak === 5);
   }
+
+  // —— 命中率口径：分子分母必须同口径（本次审查修的缺陷）——
+  // 原先 recordKill 无条件 hits+1，而地雷不计 fired，于是「1 发子弹命中 + 1 次雷杀」
+  // 算出 2/1 = 200%。修法不是把显示钳到 100%（那是遮住统计错误），而是把地雷
+  // 移出分子。这两条护栏一起把「钳位」和「口径」分开钉死。
+  {
+    check("本场命中率：没开过火返回 null（横幅据此跳过，与 0% 不是一回事）",
+      accuracyDelta({ fired: 0, hits: 0 }, { fired: 0, hits: 0 }) === null
+      && accuracyDelta({ fired: 5, hits: 2 }, { fired: 5, hits: 2 }) === null);
+    check("本场命中率与 accuracy 同源钳位（不会出现终身 100% 而本场 200%）",
+      accuracyDelta({ fired: 1, hits: 2 }, { fired: 0, hits: 0 }) === 1
+      && accuracyDelta({ fired: 4, hits: 3 }, { fired: 0, hits: 0 }) === 0.75);
+    // 基线做差：负数（理论上不该出现）也钳到 0，不显示负命中率
+    check("本场命中率负值钳到 0", accuracyDelta({ fired: 2, hits: 0 }, { fired: 1, hits: 1 }) === 0);
+  }
+  {
+    // 结构护栏：两张表无交（部署型的雷不算发射数，射击型不算部署数）
+    const overlap = FIRED_WEAPONS.filter((w) => DEPLOY_WEAPONS.includes(w));
+    check("射击型与部署型武器表无交", overlap.length === 0, overlap.join(","));
+    // 结构护栏：两张表并起来**恰好**是 normalizeStats 认得的全部武器键。
+    // 这条是防「新增武器忘了登记」：漏登记会让新武器静默落进命中率分子或分母，
+    // 把这个刚修好的 bug 原样放回来。写黑名单（`weapon !== "mine"`）就没有这道门。
+    const allKeys = Object.keys(normalizeStats(null).players[0].kills).sort();
+    const covered = [...FIRED_WEAPONS, ...DEPLOY_WEAPONS].sort();
+    check("武器分流表覆盖全部击杀键且无遗漏",
+      covered.length === allKeys.length && covered.every((w, i) => w === allKeys[i]),
+      covered.join(","));
+    check("地雷被归为部署型（不进命中率分子）", DEPLOY_WEAPONS.includes("mine"));
+  }
+  {
+    // 端到端口径复现：原先这一串算出 200%
+    const base = getStats().players[0];
+    const b0 = { fired: base.fired, hits: base.hits, mine: base.kills.mine };
+    recordFired(0, 1);            // 1 发子弹
+    recordKill(0, "bullet");      // 打死了 → 进分子
+    recordKill(0, "mine");        // 雷杀 → 只记 kills.mine，**不进**分子
+    const p = getStats().players[0];
+    check("1 发命中 + 1 次雷杀 = 100%（不是 200%）",
+      p.fired - b0.fired === 1 && p.hits - b0.hits === 1
+      && p.kills.mine - b0.mine === 1,
+      `fired+${p.fired - b0.fired} hits+${p.hits - b0.hits} mine+${p.kills.mine - b0.mine}`);
+    check("地雷击杀照旧计入 favoriteWeapon 的击杀数（只是不进分子）",
+      p.kills.mine === b0.mine + 1);
+  }
+  {
+    // 破盾那条路径与击杀同源：地雷破盾同样不进分子（只修击杀会漏掉这条）。
+    // **两条各自重新取基线**：共用一个基线的话，前一条一旦红掉就会把后一条
+    // 也带红（stats 是模块单例，前一条的副作用留在里头）——那是假红，
+    // 会让人去修一个没坏的东西（阶段 28.2 的变异测试教训）。
+    const hitsNow = () => getStats().players[0].hits;
+    const beforeMine = hitsNow();
+    recordHit(0, "mine");
+    check("地雷破盾不进命中率分子", hitsNow() === beforeMine);
+    const beforeBullet = hitsNow();
+    recordHit(0, "bullet");
+    check("子弹破盾照常进分子", hitsNow() === beforeBullet + 1);
+  }
+}
+
+// ============================================================
+section("统计接线静态扫描 (recordHit/recordKill 调用点)");
+{
+  // recordHit 从 (playerIndex) 改成 (playerIndex, weapon) 之后，**漏传 weapon 是
+  // 静默的**：countsAsHit(undefined) 为假 ⇒ 这一发命中直接不计，命中率悄悄偏低，
+  // 不崩不报错，跑分也看不出来（arena 压根不写 stats）。这正是本仓库「静态属性
+  // 扫描」那条门针对的同一族缺陷（阶段 28.2 的 TANK.speed），所以用同一个办法。
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { dirname, join } = await import("node:path");
+  const ROOT2 = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const srcFiles = readdirSync(join(ROOT2, "src")).filter((f) => f.endsWith(".js"));
+
+  const bad = [];
+  let callSites = 0;
+  for (const f of srcFiles) {
+    readFileSync(join(ROOT2, "src", f), "utf8").split("\n").forEach((line, i) => {
+      if (/^\s*(\/\/|\*|\/\*)/.test(line)) return; // 整行注释跳过
+      for (const fn of ["recordHit", "recordKill"]) {
+        const re = new RegExp("\\b" + fn + "\\(([^)]*)\\)", "g");
+        let m;
+        while ((m = re.exec(line))) {
+          callSites++;
+          // 两个参数都是简单表达式（索引与武器名），顶层逗号计数就够判
+          if (m[1].split(",").length !== 2) bad.push(`src/${f}:${i + 1} ${fn}(${m[1]})`);
+        }
+      }
+    });
+  }
+  // 取样面非空：这条门自己得先证明它扫到了东西，否则是一条恒绿的空断言
+  check("扫到了 recordHit/recordKill 的调用点与定义", callSites >= 4, `${callSites} 处`);
+  check("recordHit/recordKill 的每一处都传了 weapon（漏传会静默少计命中）",
+    bad.length === 0, bad.slice(0, 3).join(" / "));
 }
 
 // ============================================================
@@ -1635,6 +1921,322 @@ section("敌人词条 (waves elite)");
       countArmedLasers([armed, spent, plain, null]) === 1 && countArmedLasers([]) === 0
       && countArmedLasers(null) === 0);
   }
+}
+
+// ============================================================
+section("波次结算横幅分支 (ui)");
+{
+  // 本文件第一次 import `ui.js`——它只读 config/powerup/levels/upgrades，
+  // 对画布的访问全是 ctx 方法调用，所以拿 `zone.render` 那套 Proxy 录音机就能在
+  // node 里断言**画出来的文案**，不必上 CDP。
+  //
+  // 钉的是「首战不发奖杯」：`isBetterRecord(任何成绩, {wave:0})` 恒为真（新档必须
+  // 存得下第一笔记录），于是只看 newRecord 的话，**第一次玩死在第 1 波也会打出
+  // 🏆 新纪录！+ 胜利琶音**——给「立刻就死」发奖杯。所以横幅要靠 hadRecord
+  // 区分「破了一个真的存在过的记录」与「这是第一把」。
+  const { renderWaveOverBanner } = await import("../src/ui.js");
+  const texts = [];
+  const recorder = new Proxy({}, {
+    get: (_t, k) => (k === "measureText" ? () => ({ width: 0 })
+      : (...a) => { if (k === "fillText") texts.push(String(a[0])); }),
+    set: () => true,
+  });
+  const shot = (view) => {
+    texts.length = 0;
+    renderWaveOverBanner(recorder, { kills: 0, mouse: { x: -1, y: -1 }, ...view });
+    return texts.join("\n");
+  };
+
+  const first = shot({ wave: 1, best: { wave: 1, kills: 0 }, newRecord: true, hadRecord: false });
+  check("首战告负：不发奖杯", !first.includes("🏆"), first.replace(/\n/g, " | "));
+  check("首战告负：也不印「历史最高」（那会自比自）", !first.includes("历史最高"));
+
+  const broke = shot({ wave: 9, best: { wave: 9, kills: 4 }, newRecord: true, hadRecord: true });
+  check("真破纪录：发奖杯", broke.includes("🏆"));
+
+  const lost = shot({ wave: 3, best: { wave: 9, kills: 4 }, newRecord: false, hadRecord: true });
+  check("没破纪录：印历史最高、不发奖杯",
+    lost.includes("历史最高：第 9 波") && !lost.includes("🏆"));
+
+  // 默认参数向后兼容：老调用点不传 hadRecord 时按「有记录」走（原行为）
+  check("hadRecord 缺省 = true（旧调用点语义不变）",
+    shot({ wave: 9, best: { wave: 9, kills: 4 }, newRecord: true }).includes("🏆"));
+}
+
+// ============================================================
+section("config 属性读取静态扫描");
+{
+  // 全仓扫一遍「对 config 导出对象的属性读取是否真的存在」。
+  // 这条门是本次审查的产物：`scripts/arena.mjs` 读了 `TANK.speed`（真名是
+  // `TANK.moveSpeed`），于是 `moved < NaN` 恒为 false，把守点寻路替身的
+  // 「撞墙 0.8s 就交还控制权」这条脱困闸门整个变成死代码——**注释就写在那一行
+  // 上面，说它已经处理了**。这类缺陷没有任何运行时症状：不崩、不报错、跑分也只是
+  // 悄悄偏低，靠读代码和跑分都抓不到，只能靠这种机械核对。
+  // 只扫「对象型」导出（数组/标量没有属性名可查），逐行正则匹配 `TABLE.prop`。
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { dirname, join } = await import("node:path");
+  // 仓库根按**本文件位置**算而不是 cwd：这是全文件唯一读磁盘的地方，
+  // 挂在 cwd 上的话换个目录跑就直接 ENOENT 把整轮 smoke 崩掉。
+  const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const CFG = await import("../src/config.js");
+  const tables = {};
+  for (const [name, val] of Object.entries(CFG)) {
+    if (val && typeof val === "object" && !Array.isArray(val)) tables[name] = new Set(Object.keys(val));
+  }
+  // 长名优先：防 `WALL_BREAK.x` 被短名 `WALL` 抢先匹配成 `WALL` 的属性
+  const names = Object.keys(tables).sort((a, b) => b.length - a.length);
+  const BUILTIN = ["hasOwnProperty", "toString", "valueOf", "constructor"];
+  const files = [
+    ...readdirSync(join(ROOT, "src")).filter((f) => f.endsWith(".js")).map((f) => "src/" + f),
+    ...readdirSync(join(ROOT, "scripts")).filter((f) => f.endsWith(".mjs")).map((f) => "scripts/" + f),
+  ];
+  // 「这道门还在扫东西」自身也要有门：目录改名/扩展名换了会让扫描范围静默变空，
+  // 而一个恒绿的护栏比没有护栏更坏（阶段 28.1 那条 1/50 误报是同一个教训的另一面）。
+  check("静态扫描的取样面非空（文件与表都找得到）",
+    files.length >= 20 && names.length >= 10, `${files.length} 文件 / ${names.length} 表`);
+  const bad = [];
+  for (const f of files) {
+    readFileSync(join(ROOT, f), "utf8").split("\n").forEach((line, i) => {
+      if (/^\s*(\/\/|\*|\/\*)/.test(line)) return; // 整行注释跳过
+      for (const t of names) {
+        const re = new RegExp("\\b" + t + "\\.([A-Za-z_$][\\w$]*)", "g");
+        let m;
+        while ((m = re.exec(line))) {
+          if (tables[t].has(m[1]) || BUILTIN.includes(m[1])) continue;
+          bad.push(`${f}:${i + 1} ${t}.${m[1]}`);
+        }
+      }
+    });
+  }
+  check(`src/ 与 scripts/ 对 config 的属性读取全部命中（扫了 ${files.length} 个文件、${names.length} 张表）`,
+    bad.length === 0, bad.slice(0, 4).join(" / "));
+}
+
+// ============================================================
+section("设置加载期校验 (settings)");
+{
+  // settings.js 平时是浏览器专属（摸 localStorage），但它对存储的访问全在 try 里，
+  // 装一个内存 stub 就能在 node 里驱动真实的 initSettings——于是「加载期过滤」
+  // 这条不变量有了确定性的门，不必靠 CDP。
+  // **必须先快照 KEY_BINDINGS 再改**：initSettings 是原地覆写全局表（那正是它
+  // 「改完即时生效」的实现方式），不还原会污染后面所有读键位的断言。
+  const snapshot = KEY_BINDINGS.slice(0, 2).map((b) => ({ ...b }));
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+  };
+  const { initSettings } = await import("../src/settings.js");
+
+  // 造一份「前进被绑成 KeyR」的存量存档——黑名单扩容之前的玩家就是这个状态。
+  // 只堵改键面板的捕获路径的话，这份存档重启后照旧把 R 装回去，而结算横幅上
+  // 点一下前进就会静默清零整场比分：**唯一会踩到的那批人永远修不好**。
+  store.set("tank-trouble.settings.v1", JSON.stringify({
+    version: 1,
+    bindings: [
+      { forward: "KeyR", back: "KeyS", left: "KeyA", right: "KeyD", fire: "Space", special: "KeyE" },
+      { forward: "Digit2", back: "ArrowDown", left: "ArrowLeft", right: "ArrowRight", fire: "Enter", special: "ShiftRight" },
+    ],
+  }));
+  initSettings();
+  check("加载期过滤：存档里的黑名单键落回默认，不照收",
+    KEY_BINDINGS[0].forward === snapshot[0].forward
+    && KEY_BINDINGS[1].forward === snapshot[1].forward,
+    `P1.forward=${KEY_BINDINGS[0].forward} P2.forward=${KEY_BINDINGS[1].forward}`);
+  check("加载期过滤只挑黑名单键，合法自定义键照旧生效",
+    KEY_BINDINGS[0].back === "KeyS" && KEY_BINDINGS[1].fire === "Enter");
+
+  // 坏档不炸（本文件既有的「宽松校验」纪律）：非字符串/空串/缺字段一律落默认。
+  // **先把表还原再造坏档**，两条断言各自独立才说明得了各自的事（阶段 28.2 的
+  // 变异测试教训：不还原的话上一条红了这条必然连坐红）。
+  snapshot.forEach((b, i) => Object.assign(KEY_BINDINGS[i], b));
+  store.set("tank-trouble.settings.v1", JSON.stringify({
+    version: 1,
+    bindings: [{ forward: 42, back: "", left: null }, null],
+  }));
+  let threw = false;
+  try { initSettings(); } catch (e) { threw = true; }
+  check("坏档（数字/空串/null/缺字段）不抛且落默认",
+    !threw && KEY_BINDINGS[0].forward === snapshot[0].forward && KEY_BINDINGS[0].back === snapshot[0].back);
+
+  // —— 整套自洽校验（本次审查修的缺陷）——
+  // 逐字段「非法落默认」会合出一张每个字段单独合法、合起来却失灵的表，而且
+  // 失灵得毫无提示：前进存 KeyR（黑名单）落回默认 KeyW，后退存的就是 KeyW ⇒
+  // readControls 算出 move = +1 −1 = 0，车一动不动。只砸在改过键的老玩家头上，
+  // 新建存档怎么测都测不出来。
+  const ACTS = Object.keys(snapshot[0]);
+  const setStore = (p1, p2) => store.set("tank-trouble.settings.v1",
+    JSON.stringify({ version: 1, bindings: [p1, p2] }));
+  // 判据写成独立的 oracle（不复用实现）：12 个动作全是非空字符串、不含黑名单键、零重复
+  const sane = () => {
+    const codes = KEY_BINDINGS.slice(0, 2).flatMap((b) => ACTS.map((a) => b[a]));
+    return codes.every((c) => typeof c === "string" && c && !RESERVED_KEYS.includes(c))
+      && new Set(codes).size === codes.length;
+  };
+
+  const killer = { forward: "KeyR", back: "KeyW", left: "KeyA", right: "KeyD", fire: "Space", special: "KeyE" };
+  {
+    // 反证：这份存档确实是致命形状——照旧的逐字段逻辑合出来前进与后退同键。
+    // 没有这一条，上面那条断言可能只是在测一份本来就无害的夹具（测空气）。
+    const naive = { ...snapshot[0] };
+    for (const a of ACTS) {
+      const v = killer[a];
+      if (typeof v === "string" && v && !RESERVED_KEYS.includes(v)) naive[a] = v;
+    }
+    check("反证：逐字段落默认会把这份存档合成「前进 = 后退」（按 W 则 move=0）",
+      naive.forward === naive.back, `forward=${naive.forward} back=${naive.back}`);
+  }
+  snapshot.forEach((b, i) => Object.assign(KEY_BINDINGS[i], b));
+  setStore(killer, { ...snapshot[1] });
+  initSettings();
+  check("黑名单键落默认后与另一个动作撞键 → 整套落默认（不留一个失灵的动作）",
+    sane() && KEY_BINDINGS[0].forward === snapshot[0].forward
+    && KEY_BINDINGS[0].back === snapshot[0].back,
+    `forward=${KEY_BINDINGS[0].forward} back=${KEY_BINDINGS[0].back}`);
+
+  // 同一个洞的另一个入口：special 是后来加的字段，老存档里根本没有它，
+  // 于是它落默认 KeyE——而那个玩家当年把开火绑的就是 KeyE。
+  snapshot.forEach((b, i) => Object.assign(KEY_BINDINGS[i], b));
+  setStore({ forward: "KeyW", back: "KeyS", left: "KeyA", right: "KeyD", fire: "KeyE" }, { ...snapshot[1] });
+  initSettings();
+  check("老存档缺 special：落默认后与开火撞键 → 整套落默认（道具键不会静默失灵）",
+    sane() && KEY_BINDINGS[0].fire !== KEY_BINDINGS[0].special,
+    `fire=${KEY_BINDINGS[0].fire} special=${KEY_BINDINGS[0].special}`);
+
+  // 跨玩家撞键：改键面板的 findBindingConflict 扫的是两套玩家的全部动作，
+  // 加载期必须用同一把尺子，否则「面板里绑不上的组合」能从存档绕进来
+  snapshot.forEach((b, i) => Object.assign(KEY_BINDINGS[i], b));
+  setStore({ ...snapshot[0], fire: snapshot[1].forward }, { ...snapshot[1] });
+  initSettings();
+  check("跨玩家撞键也不许从存档绕进来（与改键面板同一把尺子）",
+    sane() && KEY_BINDINGS[0].fire === snapshot[0].fire,
+    `P1.fire=${KEY_BINDINGS[0].fire}`);
+
+  // 反向护栏：**不许顺手把合法存档也拒了**。只断言「坏档落默认」的话，
+  // 一个无条件返回默认的实现也能全绿——那就把改键功能整个废了。
+  snapshot.forEach((b, i) => Object.assign(KEY_BINDINGS[i], b));
+  const custom = { forward: "KeyT", back: "KeyG", left: "KeyF", right: "KeyH", fire: "KeyV", special: "KeyB" };
+  setStore(custom, { ...snapshot[1] });
+  initSettings();
+  check("整套自洽的自定义键位逐字生效",
+    sane() && ACTS.every((a) => KEY_BINDINGS[0][a] === custom[a]),
+    ACTS.map((a) => KEY_BINDINGS[0][a]).join(","));
+
+  // 后置条件：调用之后一定是一张自洽的表，与调用前的脏状态无关。
+  // 故意先人为制造一个重键（模拟上一局改键留下的状态），再喂那份不自洽的存档——
+  // 落默认那条路若只是 `return`，这张脏表就会原样留着。
+  KEY_BINDINGS[0].back = KEY_BINDINGS[0].forward;
+  setStore(killer, { ...snapshot[1] });
+  initSettings();
+  check("后置条件：落默认那条路显式写回全局表（不是 return 了事）",
+    sane() && KEY_BINDINGS[0].back === snapshot[0].back,
+    `back=${KEY_BINDINGS[0].back}`);
+
+  // 还原全局表，别把污染带给后面的 section
+  snapshot.forEach((b, i) => Object.assign(KEY_BINDINGS[i], b));
+  delete globalThis.localStorage;
+}
+
+// ============================================================
+section("鼠标点击坐标 (input)");
+{
+  // input.js 在模块顶层挂 window 事件（keydown/keyup/blur），装个 stub 就能在
+  // node 里驱动真实的 bindMouse/getClickPos——于是「点 A 执行 B」这条不变量
+  // 有了确定性的门，不必靠 CDP 手动比对。
+  globalThis.window = { addEventListener: () => {} };
+  const on = {};
+  const canvas = {
+    addEventListener: (type, fn) => { on[type] = fn; },
+    // 1:1 映射（rect 尺寸 = 逻辑尺寸），于是 clientX/Y 直接就是逻辑坐标
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: CANVAS.width, height: CANVAS.height }),
+  };
+  const { bindMouse, getMousePos, getClickPos, isClicked, endFrame } = await import("../src/input.js");
+  bindMouse(canvas);
+
+  // 复现：同一帧里 mousemove(A) → click(A) → mousemove(B)。
+  // 事件是异步到的、命中检测是下一帧才消费的，所以这段窗口真实存在；
+  // 旧实现只存一份坐标，这一帧消费到的是 B——按下 A 按钮、执行 B 按钮。
+  // 菜单上还能退回来，抽卡浮层上是不可撤销的误选（选中那张卡当场施加）。
+  on.mousemove({ clientX: 100, clientY: 200 });
+  on.click({ clientX: 100, clientY: 200 });
+  on.mousemove({ clientX: 700, clientY: 600 });
+  check("点击坐标不被 click 之后到达的 mousemove 推走",
+    isClicked() && getClickPos().x === 100 && getClickPos().y === 200,
+    `clickPos=(${getClickPos().x},${getClickPos().y})`);
+  check("hover 坐标照旧跟手（按钮高亮要跟着动，这一份不能也被钉住）",
+    getMousePos().x === 700 && getMousePos().y === 600);
+  // 反证：夹具确实是致命形状——hover 真的漂到了另一个位置，旧实现必然读到它
+  check("反证：旧实现读的那份坐标确实已经漂走",
+    getMousePos().x !== getClickPos().x);
+
+  endFrame();
+  check("endFrame 复位点击边沿", !isClicked());
+
+  // 合成点击（CDP 驱动 / 无障碍工具）不发 mousemove，坐标也必须对：
+  // 点击事件自带 clientX/Y，不再依赖「点击前先 mouseMoved」这条潜规则
+  on.click({ clientX: 333, clientY: 444 });
+  check("不发 mousemove 的合成点击也带坐标",
+    isClicked() && getClickPos().x === 333 && getClickPos().y === 444
+    && getMousePos().x === 333, `clickPos=(${getClickPos().x},${getClickPos().y})`);
+
+  // 一帧只消费一次点击动作（justClicked 是布尔量），所以同帧第二次点击整条丢掉、
+  // 连坐标也不覆盖：先按下的那一下才是玩家的意思
+  on.click({ clientX: 10, clientY: 20 });
+  check("同帧第二次点击整条丢掉（坐标不被覆盖）",
+    getClickPos().x === 333 && getClickPos().y === 444);
+  endFrame();
+
+  // 缩放窗口（rect 比逻辑尺寸小一半）时两条路径的映射必须逐字相同，
+  // 否则 hover 高亮与实际命中会差一个比例——最难查的那种偏移
+  const half = {
+    addEventListener: (type, fn) => { on[type] = fn; },
+    getBoundingClientRect: () => ({ left: 20, top: 10, width: CANVAS.width / 2, height: CANVAS.height / 2 }),
+  };
+  bindMouse(half);
+  on.mousemove({ clientX: 20 + 100, clientY: 10 + 50 });
+  const hoverAt = getMousePos();
+  on.click({ clientX: 20 + 100, clientY: 10 + 50 });
+  check("小窗缩放下 click 与 mousemove 的坐标映射一致",
+    getClickPos().x === hoverAt.x && getClickPos().y === hoverAt.y
+    && getClickPos().x === 200 && getClickPos().y === 100,
+    `click=(${getClickPos().x},${getClickPos().y}) hover=(${hoverAt.x},${hoverAt.y})`);
+  endFrame();
+  delete globalThis.window;
+}
+
+// ============================================================
+section("窗口状态坏档容错 (electron/window-state)");
+{
+  // 主进程的 main.cjs 一 require 就会跑 app.whenReady，node 直跑必崩，所以它里面
+  // 的容错分支原本进不了任何自动化门。校验拆成纯函数后这几条退化路径可以逐条钉死
+  // （与 stats.js「纯计算与存储访问分离」同一条纪律）。
+  const mod = await import("../electron/window-state.cjs");
+  const { normalizeWindowState } = mod.default ?? mod;
+
+  // JSON.parse 对这些**都不抛**（它们是合法 JSON），但返回的不是能读属性的对象。
+  // 旧代码紧接着读 saved.fullscreen 就抛 TypeError，而那行在 createWindow 里、
+  // whenReady 之后 —— 后果不是「全屏状态没恢复」，是窗口建不出来、游戏打不开。
+  const bad = [null, 0, 3, "", "x", true, false, [], [1, 2]];
+  const offenders = bad.filter((raw) => {
+    const r = normalizeWindowState(raw);
+    return !r || typeof r !== "object" || Array.isArray(r) || r.fullscreen;
+  });
+  check("非对象的合法 JSON（null/数字/字符串/布尔/数组）一律落默认窗口态",
+    offenders.length === 0, JSON.stringify(offenders));
+  check("fullscreen 只放行布尔，别的类型落 false",
+    normalizeWindowState({ fullscreen: true }).fullscreen === true
+    && normalizeWindowState({ fullscreen: false }).fullscreen === false
+    && normalizeWindowState({ fullscreen: 1 }).fullscreen === false
+    && normalizeWindowState({ fullscreen: "true" }).fullscreen === false
+    && normalizeWindowState({}).fullscreen === false);
+  check("正常存档（写盘路径写出来的那种）照旧恢复全屏",
+    normalizeWindowState(JSON.parse(JSON.stringify({ fullscreen: true }))).fullscreen === true);
+  // 反证：旧写法在 "null" 这份输入上确实会抛——否则上面那条断言是在测空气
+  let threwOld = false;
+  try { void JSON.parse("null").fullscreen; } catch (e) { threwOld = true; }
+  check('反证：旧写法读 JSON.parse("null").fullscreen 确实抛 TypeError', threwOld);
 }
 
 // ============================================================

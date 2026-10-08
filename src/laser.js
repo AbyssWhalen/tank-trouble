@@ -119,7 +119,9 @@ export class LaserBeam {
 // 全程可见是激光的平衡设计：威力不削，但持有者的杀伤线全暴露，
 // 对手可以绕线走位——「暗杀」变「明枪」。
 export function renderLaserPreview(ctx, tank, walls) {
-  const m = tank.muzzlePoint();
+  // 出膛点传 walls 做贴墙修正——必须与 tryFire 那一侧同参数，否则贴墙时
+  // 虚线画的是穿墙路径而实弹走的是反弹路径，「所见即所打」当场失效
+  const m = tank.muzzlePoint(walls);
   const pts = castLaserPath(m.x, m.y, m.angle, walls);
   if (pts.length < 2) return;
 

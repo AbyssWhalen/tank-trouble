@@ -14,9 +14,15 @@ const pressed = new Set();
 // 每帧主循环消费后清空。
 const justPressed = new Set();
 
-// 鼠标状态：当前坐标（相对 canvas 左上角的 CSS 像素）+ 本帧是否刚点击。
-// 菜单用屏幕坐标画按钮，命中检测也用屏幕坐标，所以这里存 CSS 像素即可。
-const mouse = { x: 0, y: 0 };
+// 鼠标状态：**两份坐标，刻意不合并**——实时 hover 一份，本帧那次点击一份。
+// 菜单用逻辑坐标画按钮，命中检测也用逻辑坐标，所以这里存逻辑坐标即可（映射见 bindMouse）。
+//
+// 为什么点击要自己留一份：事件是异步到的，命中检测是**下一帧**才消费的，于是
+// 「click 已经发生、这一帧还没消费」这段窗口里照旧会来一串 mousemove。只存一份
+// 坐标的话，按下去的是 A 按钮、手滑到 B 再等一帧，执行的就是 B——
+// 菜单上还能退回来，抽卡浮层上是不可撤销的误选（选中那张卡当场就施加到坦克上了）。
+const mouse = { x: 0, y: 0 };      // 实时 hover：按钮高亮、抽卡卡面 hover 用
+const clickPos = { x: 0, y: 0 };   // 本帧那次点击发生时的坐标（仅 justClicked 为真时有意义）
 let justClicked = false;
 
 window.addEventListener("keydown", (e) => {
@@ -43,18 +49,38 @@ window.addEventListener("blur", () => {
   justPressed.clear();
 });
 
-// 绑定鼠标到 canvas：菜单交互用。
-// 坐标映射到「逻辑坐标系」(CANVAS.width/height = 960×720)，与 render 用的坐标一致。
+// 鼠标事件坐标 → 逻辑坐标系 (CANVAS.width/height = 960×720)，与 render 用的坐标一致。
 // 关键：HiDPI 适配后 canvas.width 是物理像素(960×dpr)，绝不能用它做映射目标——
 // 否则鼠标会被映射到物理系，和按钮的逻辑坐标错位、点击必偏。
 // rect 是 canvas 在屏幕上的实际 CSS 尺寸，按它把光标位置归一化后乘逻辑尺寸即可。
+// mousemove 与 click 共用这一个函数：两条路径的算式必须逐字相同，否则 hover 高亮
+// 与实际命中会差一个比例（小窗缩放下才显形，是最难查的那种偏移）。
+function toLogical(canvas, e) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: ((e.clientX - rect.left) / rect.width) * CANVAS.width,
+    y: ((e.clientY - rect.top) / rect.height) * CANVAS.height,
+  };
+}
+
+// 绑定鼠标到 canvas：菜单交互用。hover 与点击各存一份坐标，见文件上方注释。
 export function bindMouse(canvas) {
   canvas.addEventListener("mousemove", (e) => {
-    const rect = canvas.getBoundingClientRect();
-    mouse.x = ((e.clientX - rect.left) / rect.width) * CANVAS.width;
-    mouse.y = ((e.clientY - rect.top) / rect.height) * CANVAS.height;
+    const p = toLogical(canvas, e);
+    mouse.x = p.x;
+    mouse.y = p.y;
   });
-  canvas.addEventListener("click", () => {
+  canvas.addEventListener("click", (e) => {
+    const p = toLogical(canvas, e);
+    // hover 也对齐到点击位置：鼠标确实就在那儿，顺带让「不发 mousemove 的合成点击」
+    // （CDP 驱动、无障碍工具）也能正确命中，不再依赖"点击前先 mouseMoved"这条潜规则
+    mouse.x = p.x;
+    mouse.y = p.y;
+    // 一帧只消费一次点击动作（justClicked 是布尔量），所以同帧的第二次点击**整条丢掉**、
+    // 连坐标也不覆盖：先按下的那一下才是玩家的意思，后到的被丢弃与改动前同形
+    if (justClicked) return;
+    clickPos.x = p.x;
+    clickPos.y = p.y;
     justClicked = true;
   });
 }
@@ -99,9 +125,15 @@ export function readControls(keys) {
   };
 }
 
-// 鼠标当前坐标（canvas 内部像素坐标），菜单命中检测用
+// 鼠标当前坐标（逻辑坐标系）——**只给 hover 用**（按钮高亮、卡面高亮）。
+// 命中检测请用 getClickPos()，理由见文件上方 clickPos 的注释。
 export function getMousePos() {
   return { x: mouse.x, y: mouse.y };
+}
+
+// 本帧那次点击**发生时**的坐标（命中检测用）。只在 isClicked() 为真时有意义。
+export function getClickPos() {
+  return { x: clickPos.x, y: clickPos.y };
 }
 
 // 本帧是否刚点击鼠标（边沿触发，用于点按钮），endFrame 后复位

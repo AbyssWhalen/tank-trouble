@@ -1,16 +1,21 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { normalizeWindowState } = require('./window-state.cjs');
 
 // 窗口状态持久化（目前只记全屏与否）。渲染进程无 IPC 摸不到 setFullScreen，
 // 所以全屏的切换(F11)与记忆都放主进程，存 userData 下的小 JSON。
 const stateFile = () => path.join(app.getPath('userData'), 'window-state.json');
 
+// 读取（IO）+ 校验（纯函数，见 window-state.cjs）。校验必须在这里做：
+// JSON.parse 对 "null" / "3" 这类合法 JSON 不抛，返回非对象时下面读
+// saved.fullscreen 会抛 TypeError，而这是在 createWindow 里、whenReady 之后——
+// 后果是窗口根本建不出来。容忍它只花一行，不容忍是「启动即黑屏」。
 function loadWindowState() {
   try {
-    return JSON.parse(fs.readFileSync(stateFile(), 'utf8'));
+    return normalizeWindowState(JSON.parse(fs.readFileSync(stateFile(), 'utf8')));
   } catch {
-    return {}; // 首次运行/文件损坏都当默认窗口态
+    return {}; // 首次运行/文件损坏/无读权限都当默认窗口态
   }
 }
 
