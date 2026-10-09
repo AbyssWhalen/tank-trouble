@@ -1204,7 +1204,7 @@ section("统计接线静态扫描 (recordHit/recordKill 调用点)");
   const bad = [];
   let callSites = 0;
   for (const f of srcFiles) {
-    readFileSync(join(ROOT2, "src", f), "utf8").split("\n").forEach((line, i) => {
+    readFileSync(join(ROOT2, "src", f), "utf8").replace(/\r\n/g, "\n").split("\n").forEach((line, i) => {
       if (/^\s*(\/\/|\*|\/\*)/.test(line)) return; // 整行注释跳过
       for (const fn of ["recordHit", "recordKill"]) {
         const re = new RegExp("\\b" + fn + "\\(([^)]*)\\)", "g");
@@ -1997,7 +1997,7 @@ section("config 属性读取静态扫描");
     files.length >= 20 && names.length >= 10, `${files.length} 文件 / ${names.length} 表`);
   const bad = [];
   for (const f of files) {
-    readFileSync(join(ROOT, f), "utf8").split("\n").forEach((line, i) => {
+    readFileSync(join(ROOT, f), "utf8").replace(/\r\n/g, "\n").split("\n").forEach((line, i) => {
       if (/^\s*(\/\/|\*|\/\*)/.test(line)) return; // 整行注释跳过
       for (const t of names) {
         const re = new RegExp("\\b" + t + "\\.([A-Za-z_$][\\w$]*)", "g");
@@ -2087,6 +2087,28 @@ section("玩法说明浮层排版 (ui.renderHelpOverlay)");
   const outOfCanvas = pts.filter((p) => p.y < 0 || p.y > CANVAS.height || p.x < 0 || p.x > CANVAS.width);
   check("说明页所有绘制坐标都落在画布内", outOfCanvas.length === 0,
     outOfCanvas.slice(0, 2).map((p) => `(${p.x.toFixed(0)},${p.y.toFixed(0)})`).join(" "));
+  // —— 结构护栏：清 effects 的地方必须同时排空震动 ——
+  // `effects` 数组与 effects.js 的**模块级**震动是同一份「表现层残留」的两半，
+  // 而只有数组那一半在转场时被显式清掉，另一半靠 resetShake() 手动调。
+  // 阶段 27.1 补了 setupRound 那一处、**漏了 remapWaveArena**（章界换图），
+  // 于是喘息最后 0.35s 的震动会漏进新章的 3-2-1，还会吞掉新章第一次击杀的震动。
+  // 把「两半必须一起清」写成可执行的门：以后再多一个转场点也不会只清一半。
+  {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, join } = await import("node:path");
+    const ROOT4 = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const mainSrc = readFileSync(join(ROOT4, "src", "main.js"), "utf8").replace(/\r\n/g, "\n");
+    // 按 `\nfunction ` 切出函数体，模块顶层那句 `let effects = []` 自然落在第 0 段
+    const bodies = mainSrc.split("\nfunction ");
+    const clearing = bodies.slice(1).filter((b) => /^\s*effects = \[\];/m.test(b));
+    check("反证：真的扫到了清 effects 的函数", clearing.length >= 2, `${clearing.length} 处`);
+    const half = clearing
+      .filter((b) => !/resetShake\(\)/.test(b))
+      .map((b) => b.slice(0, b.indexOf("(")));
+    check("每个清 effects 的转场点都同时排空了屏幕震动（两半必须一起清）",
+      half.length === 0, half.join(","));
+  }
 }
 
 // ============================================================
@@ -2160,7 +2182,7 @@ section("上下文一次性提示 (hints)");
     const { fileURLToPath } = await import("node:url");
     const { dirname, join } = await import("node:path");
     const ROOT3 = join(dirname(fileURLToPath(import.meta.url)), "..");
-    const mainSrc = readFileSync(join(ROOT3, "src", "main.js"), "utf8");
+    const mainSrc = readFileSync(join(ROOT3, "src", "main.js"), "utf8").replace(/\r\n/g, "\n");
     const unwired = HINT_IDS.filter((id) => !mainSrc.includes(`maybeHint("${id}")`));
     check("每条提示都有触发点（没接线的提示是静默死码）", unwired.length === 0, unwired.join(","));
     // 反向：别触发表里没有的 id（拼错 ⇒ shouldShow 恒 false ⇒ 同样静默）
