@@ -2014,6 +2014,82 @@ section("config 属性读取静态扫描");
 }
 
 // ============================================================
+section("玩法说明浮层排版 (ui.renderHelpOverlay)");
+{
+  // 用 Proxy 当 ctx 录音机（阶段 28.2 的办法）把这一页画出来的每一次 fillText 录下来。
+  // 这一页是**纯 ctx 调用**，所以 node 里就能跑，不必起 Electron。
+  const { renderMenu } = await import("../src/ui.js");
+  const texts = [];
+  const pts = [];
+  const rec = (x, y) => { if (Number.isFinite(x) && Number.isFinite(y)) pts.push({ x, y }); };
+  const ctx = new Proxy({}, {
+    get(_t, k) {
+      if (k === "measureText") return () => ({ width: 0 });
+      if (k === "fillText") return (text, x, y) => { texts.push({ text, x, y }); rec(x, y); };
+      if (k === "canvas") return { width: CANVAS.width, height: CANVAS.height };
+      return (...a) => { if (a.length >= 2) rec(a[0], a[1]); };
+    },
+    set() { return true; },
+  });
+  renderMenu(ctx, { mouse: { x: -1, y: -1 }, showHelp: true });
+
+  // **只取说明页那一段**：renderMenu 先画菜单、再把说明页叠在上面，而 Proxy 把
+  // 底下菜单的 fillText 一并录了。初版没切这一刀，于是「末行」取到的是「波次生存」
+  // 按钮的标签——断言在测一个跟说明页无关的东西（抬 ph 反而让它更红，因为提示
+  // 下移后又把按钮的副标题纳入了「内容」）。说明页是最后画的，所以从标题切开即可。
+  const start = texts.findIndex((t) => t.text === "玩法说明");
+  check("说明页确实画出来了（标题在录音里）", start >= 0);
+  const help = start >= 0 ? texts.slice(start) : [];
+
+  check("录到了说明页的文字", help.length >= 15, `${help.length} 段`);
+
+  // —— 这一页该有的「看不见的规则」——
+  // 判据是「玩家不死一次学不会」：三方武器槽互斥、持雷超时、守点计时语义。
+  // 阶段 28.4 之前这三条在全游戏任何地方都没写过。
+  const all = help.map((t) => t.text).join("\n");
+  const must = [
+    ["武器槽互斥（捡新的顶掉旧的）", /顶掉/],
+    ["护盾独立不冲突", /护盾独立|不冲突/],
+    ["地雷不认主人", /不认主人/],
+    ["持雷超时作废", /10 秒作废|超过 10 秒/],
+    ["守点要站进圈里", /站进圈里/],
+    ["守点离开只暂停不倒退", /不倒退/],
+  ];
+  const missing = must.filter(([, re]) => !re.test(all)).map(([n]) => n);
+  check("说明页覆盖「看不见就学不会」的那几条规则", missing.length === 0, missing.join(" / "));
+
+  // —— 行宽：相对比较，不依赖字体度量 ——
+  // node 没有 measureText，但**相对**判据不需要它：阶段 28.4 之前最长那行
+  // （旧版「地雷：…」）在实机 CDP 里量到宽 504.85px，而正文可用内宽是 508px
+  // （文字起点 px+52 到面板右界 px+560）——即它是一条**已知刚好放得下**的线。
+  // 所以只要每行的估算宽度都 ≤ 它的估算宽度，就不可能溢出，字体误差整体抵消。
+  const REF = "地雷：捡取后按道具键在车尾布雷（共 2 颗），1 秒布防后近敌即炸（不认主人）";
+  const estW = (s) => [...s].reduce((w, ch) => w + (/[⺀-￿　-〿＀-￯]/.test(ch) ? 1 : 0.56), 0);
+  const refW = estW(REF);
+  const tooWide = help.filter((t) => estW(t.text) > refW).map((t) => `${t.text}(${estW(t.text).toFixed(1)}>${refW.toFixed(1)})`);
+  check(`说明页每行都不超过「已知刚好放得下」的那条基准线（${refW.toFixed(1)} 字宽）`,
+    tooWide.length === 0, tooWide.slice(0, 2).join(" / "));
+  // 反证：基准线自己确实接近上界——拿它加三个字必须判超宽，否则这条断言太松
+  check("反证：基准线加三个字就会判超宽", estW(REF + "三个字") > refW);
+
+  // —— 垂直排版：末行与底部关闭提示不许压在一起 ——
+  // 阶段 28.4 加规则前，ph=480 下末行基线 py+422、提示 py+452，只剩一行的余量；
+  // 再加四行就会叠上去。这条断言把「加行必须同步抬 ph」变成可执行的门。
+  const hint = help.find((t) => /点击任意处关闭/.test(t.text));
+  check("说明页有底部关闭提示", !!hint);
+  if (hint) {
+    const content = help.filter((t) => t !== hint && t.y < hint.y).map((t) => t.y);
+    const lastY = Math.max(...content);
+    check("末行与关闭提示之间留够一行间距（加行忘了抬面板高度就会红）",
+      hint.y - lastY >= 24, `末行 y=${lastY} 提示 y=${hint.y} 间距 ${hint.y - lastY}`);
+  }
+  // 面板连边框带文字整体不许画出画布（ph 抬过头会从上下溢出）
+  const outOfCanvas = pts.filter((p) => p.y < 0 || p.y > CANVAS.height || p.x < 0 || p.x > CANVAS.width);
+  check("说明页所有绘制坐标都落在画布内", outOfCanvas.length === 0,
+    outOfCanvas.slice(0, 2).map((p) => `(${p.x.toFixed(0)},${p.y.toFixed(0)})`).join(" "));
+}
+
+// ============================================================
 section("设置加载期校验 (settings)");
 {
   // settings.js 平时是浏览器专属（摸 localStorage），但它对存储的访问全在 try 里，
