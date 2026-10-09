@@ -89,7 +89,7 @@ npm start
 ## 开发 | Development
 
 ```bash
-# 开发模式（热重载）| Dev mode with hot reload
+# 开发模式启动（没有 watcher，改完源码重启窗口生效）| Dev mode (no watcher; restart the window to pick up source changes)
 npm start
 
 # 打包 Windows 安装包 | Build Windows installer
