@@ -18,7 +18,8 @@
 //     audio: { muted: false },     // 音效静音开关
 //     wallBreak: true,             // 地雷炸墙开关（菜单「地形」chip）
 //     challenge: 0,                // 挑战模式已通关数（0=从头开始）
-//     waveBest: { wave, kills }    // 波次生存最高记录（wave=0 视为无记录）
+//     waveBest: { wave, kills },   // 波次生存最高记录（wave=0 视为无记录）
+//     hintsSeen: ["ricochet", …]   // 已看过的一次性提示 id（见 hints.js）
 //   }
 // ============================================================
 
@@ -183,4 +184,20 @@ export function loadWaveBest() {
 // 破纪录时写盘（是否破纪录由 waves.isBetterRecord 判，这里只负责落地）
 export function saveWaveBest(rec) {
   writeStore({ waveBest: { wave: rec.wave | 0, kills: rec.kills | 0 } });
+}
+
+// 读已看过的一次性提示 id 列表：没存过/非法返回 null（调用方交给
+// hints.normalizeSeen 落 []）。与 waveBest 同样只做粗筛——认不认识这些 id
+// 是 hints.js 的事，这里不该知道提示表长什么样。
+export function loadHintsSeen() {
+  const data = readStore();
+  if (!data || !Array.isArray(data.hintsSeen)) return null;
+  return data.hintsSeen;
+}
+
+// 弹过一条新提示就写盘。**必须立刻写**而不是等退出时统一写：
+// 一次性提示的全部价值就在「只弹一次」，而这个模式里玩家是会直接关窗口的，
+// 攒着写等于下一局重新弹一遍。
+export function saveHintsSeen(ids) {
+  writeStore({ hintsSeen: Array.isArray(ids) ? ids.filter((x) => typeof x === "string") : [] });
 }

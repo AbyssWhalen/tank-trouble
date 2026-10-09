@@ -18,7 +18,7 @@ import {
   CANVAS, PLAYER_COLORS, ENEMY_COLORS, KEY_BINDINGS, MAZE_TIERS, TIER_POOL_BY_MODE,
   WALL, CELL_SIZE, BULLET, TANK, THEME, ROUND_RESTART_DELAY,
   POWERUP, PICKUP_RATE, MATCH_TARGET, ROUND_INTRO, SLOWMO, STYLE_POOL_BY_MODE, WAVE, UPGRADE,
-  RESERVED_KEYS,
+  RESERVED_KEYS, HINT,
 } from "./config.js";
 import { Player } from "./player.js";
 import { generateMaze, destroyWallsInRadius, destroyWallSegments } from "./maze.js";
@@ -40,6 +40,7 @@ import {
   renderLevelSelectOverlay, renderLevelOverBanner, renderWaveOverBanner, renderDraftOverlay,
   menuAction, pauseAction, rebindAction, settingsAction, matchOverAction,
   levelSelectAction, levelOverAction, waveOverAction, draftAction, keyLabel,
+  renderHintToast,
 } from "./ui.js";
 import {
   initSettings, saveBindings, resetBindings,
@@ -48,6 +49,7 @@ import {
   loadWallBreak, saveWallBreak,
   loadChallengeProgress, saveChallengeProgress,
   loadWaveBest, saveWaveBest,
+  loadHintsSeen, saveHintsSeen,
 } from "./settings.js";
 import { LEVELS, LEVEL_COUNT, evaluateObjective, objectiveOf, normalizeProgress } from "./levels.js";
 import { evaluate } from "./objectives.js";
@@ -60,6 +62,9 @@ import { pickZoneSpot, HoldZone } from "./zone.js";
 import {
   pickOffers, applyUpgrade, fieldCapOf, supplyCountOf,
 } from "./upgrades.js";
+import {
+  hintText, normalizeSeen, shouldShow, markSeen, weaponHeld, isWeaponSwap,
+} from "./hints.js";
 import { initAudio, playSfx, toggleMuted, isMuted } from "./audio.js";
 import {
   loadStats, saveStats, getStats, accuracy, accuracyDelta, favoriteWeapon,
@@ -130,6 +135,14 @@ let matchStatsBase = null;     // 本场统计基线（startMatch 快照，横�
 let introTimer = 0;            // 回合开场倒计时（秒）：>0 时双方全冻结（含 AI 决策）
 let goTimer = 0;               // "GO!" 余像计时（解冻后纯视觉）
 let slowmoTimer = 0;           // 击杀慢动作剩余（真实秒）：>0 时游戏 dt × SLOWMO.scale
+
+// —— 上下文一次性提示（阶段 28.5）。表与纯逻辑在 hints.js，渲染在 ui.renderHintToast ——
+// hintsSeen 是**跨局持久**的（存 settings）：一条提示见过就永不再弹，否则老玩家
+// 每把都要被告知自己的跳弹会杀自己，教学就变成噪音。
+let hintsSeen = normalizeSeen(loadHintsSeen());
+let hintQueue = [];            // 待显示的 id（同一帧可能触发两条，排队逐条放）
+let hintNow = null;            // 正在显示的 id（null = 没有）
+let hintTimer = 0;             // 当前这条还剩多久（真实秒）
 let pendingSoloSlowmo = false; // 单人模式（挑战/波次）：本帧有击杀，胜负段确认终局后才转正为慢镜
 
 // —— 挑战关卡模式状态 ——
@@ -295,6 +308,18 @@ window.__devHook = {
   forceDraft: () => openDraft(),
   pickDraft: (i) => { if (draft.open) applyDraftPick(i | 0); },
   modsOf: (i) => (players[i] ? { ...players[i].tank.mods } : null),
+  // 阶段 28.5 提示层：hintState 是唯一窥视口（提示条只在屏幕上存在 4.5 秒，
+  // 截图抓不准时机）；forceHint 走的是与真实触发点完全同一条 maybeHint，
+  // 所以验的是真链路不是假观测；resetHints 让实机能把「只弹一次」重复验几遍。
+  hintState: () => ({ now: hintNow, timer: hintTimer, queue: [...hintQueue], seen: [...hintsSeen] }),
+  forceHint: (id) => maybeHint(String(id)),
+  resetHints: () => {
+    hintsSeen = [];
+    saveHintsSeen(hintsSeen);
+    hintQueue = [];
+    hintNow = null;
+    hintTimer = 0;
+  },
   blastAt: (x, y) => {
     // 直接触发一次炸墙结算（跳过地雷实体，专测破墙链路：几何/特效/音效/开关）
     if (!maze || !wallBreakEnabled) return 0;
@@ -455,6 +480,7 @@ function loop(now) {
   const gameDt = slowmoTimer > 0 ? dt * SLOWMO.scale : dt;
   slowmoTimer = Math.max(0, slowmoTimer - dt);
   goTimer = Math.max(0, goTimer - dt);
+  advanceHints(dt); // 同样用真实 dt：慢镜不该把一条提示拉长到 13 秒
   update(gameDt);
   render();
   requestAnimationFrame(loop);
@@ -668,6 +694,32 @@ function findBindingConflict(code) {
   return null;
 }
 
+// 触发一条上下文提示：没见过才排队，并**当场写盘**。
+// 立刻写而不是攒着：一次性提示的全部价值就是「只弹一次」，而这个模式里玩家会
+// 直接关窗口，攒着写等于下一局重新弹一遍。
+// **只给玩家 1（人类位）调**——AI 的拾取与死亡不该教任何人东西。
+function maybeHint(id) {
+  if (!shouldShow(id, hintsSeen)) return;
+  hintsSeen = markSeen(id, hintsSeen);
+  saveHintsSeen(hintsSeen);
+  if (hintQueue.length < HINT.maxQueue) hintQueue.push(id);
+}
+
+// 推进提示条（真实 dt，在 loop 里调）。
+// **刻意不随转场清空**：最该被看见的那条（跳弹自杀）恰好在死亡那一刻触发，
+// 而死亡紧接着就是 ROUND_OVER / WAVE_OVER 转场——照「转场排空」的惯例清掉队列，
+// 这条提示就永远看不见。它只是一行 4.5 秒的字，跨过一次转场无害。
+function advanceHints(dt) {
+  if (hintTimer > 0) {
+    hintTimer = Math.max(0, hintTimer - dt);
+    if (hintTimer === 0) hintNow = null;
+  }
+  if (!hintNow && hintQueue.length) {
+    hintNow = hintQueue.shift();
+    hintTimer = HINT.duration;
+  }
+}
+
 // 统一命中结算（阶段 23 抽出）：有盾消盾、无盾击杀——子弹/散射/激光/地雷共用。
 // weapon 用于统计归类；killerTank 用于排除自伤统计。慢动作与统计的
 // 模式分流集中在这一处（单人模式多敌人：非终局击杀不慢镜、不进终身统计）。
@@ -684,6 +736,10 @@ function hitPlayer(p, weapon, killerTank) {
     return false;
   }
   p.tank.alive = false;
+  // 被**自己的**弹打死：这是新玩家的第一死因，而画面上没有任何东西说明
+  // 「反弹后的子弹不认主人」。出膛宽限保证未反弹的弹打不到自己，所以
+  // 「自己打死自己」实际上恒等于「被自己的跳弹打死」，文案可以直说跳弹。
+  if (p === players[0] && killerTank === p.tank) maybeHint("ricochet");
   effects.push(new TankExplosion(p.tank.x, p.tank.y, p.color));
   addShake(5, 0.3);
   playSfx("kill");
@@ -781,7 +837,16 @@ function updatePlaying(dt) {
     for (const pw of powerups) {
       if (pw.taken) continue;
       if (circleVsCircle(p.tank.x, p.tank.y, TANK.radius, pw.x, pw.y, POWERUP.radius)) {
+        // 顶掉判定要在 applyPowerup **之前**抓快照——它会就地清掉旧武器槽，
+        // 之后再问「原来握着什么」已经问不出来了
+        const heldBefore = p === players[0] ? weaponHeld(p.tank) : null;
         p.tank.applyPowerup(pw.type);
+        if (p === players[0]) {
+          if (isWeaponSwap(heldBefore, pw.type)) maybeHint("weaponSwap");
+          // 第一次拿到激光就说清「这条线对手也看得见」——激光的整个平衡
+          // 都靠意图外露，而持枪方自己看不出那条线是公开的
+          if (pw.type === "laser") maybeHint("laserSeen");
+        }
         pw.taken = true; // 标记，循环后统一过滤（避免边遍历边删）
         effects.push(new PickupFlash(pw.x, pw.y, pw.type));
         playSfx("pickup", { rate: PICKUP_RATE[pw.type] ?? 1 });
@@ -869,6 +934,14 @@ function updatePlaying(dt) {
         break; // 一颗子弹只打一个
       }
     }
+  }
+
+  // 5.9) 持雷快作废：坦克本来就会闪烁示警，但没人知道闪烁的意思是「要作废了」
+  //      而不是「装备好了」。阈值跟 ui.renderWeaponBadges 的闪烁门一致（<3s），
+  //      所以提示与画面上开始闪的那一刻同步。
+  if (players[0]?.alive && players[0].tank.mineCharges > 0
+      && players[0].tank.mineHoldTimer > 0 && players[0].tank.mineHoldTimer < 3) {
+    maybeHint("mineTimeout");
   }
 
   // 6) 清理消亡子弹 + 推进道具呼吸动画 + 推进特效（播完移除）
@@ -1092,6 +1165,10 @@ function beginWave(n) {
   holdZone = waveGoal.type === "hold"
     ? makeHoldZone(waveGoal.secs)
     : null;
+  // 第一次遇到守点波就说清规则：圈不会写自己要守多久，而「离开只暂停不倒退」
+  // 正是让它不成为隐藏失败态的那条设计（HUD 的「站进圈内才计时」只在出圈时才出现，
+  // 说的也只是其中一半）
+  if (holdZone) maybeHint("holdZone");
   // **挑不出圈就退回普通清场波**（守点波的唯一死局出口）。pickZoneSpot 声称永不返
   // null，但它确实有一条 return null（整张图没有一格塞得下车）；一旦命中，这一波就是
   // hold 目标 + quotaLeft=Infinity + 没有圈可站 ⇒ holdSecs 恒 0、evaluate 永不返 win、
@@ -1423,6 +1500,14 @@ function render() {
         newRecord: waveNewRecord, hadRecord: waveHadRecord, mouse: getMousePos(),
       });
       break;
+  }
+
+  // 提示条画在**最后、switch 之外**：它要跨状态活着。
+  // 最该被看见的那条（跳弹自杀）在死亡那一刻触发，而死亡紧接着就是
+  // ROUND_OVER / LEVEL_OVER / WAVE_OVER——只在 PLAYING 里画它就等于永远看不见。
+  // 排除 MENU（提示是对局内容）与 PAUSED（整屏遮罩，底下什么都不该露）。
+  if (hintNow && state !== STATE.MENU && state !== STATE.PAUSED) {
+    renderHintToast(ctx, hintText(hintNow));
   }
 }
 

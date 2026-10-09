@@ -2090,6 +2090,154 @@ section("玩法说明浮层排版 (ui.renderHelpOverlay)");
 }
 
 // ============================================================
+section("上下文一次性提示 (hints)");
+{
+  const {
+    HINTS, HINT_IDS, WEAPON_TYPES, hintText, normalizeSeen, shouldShow, markSeen,
+    weaponHeld, isWeaponSwap,
+  } = await import("../src/hints.js");
+  const { HINT } = await import("../src/config.js");
+
+  // —— 表本身 ——
+  check("提示表非空且 id 互异",
+    HINTS.length >= 4 && new Set(HINT_IDS).size === HINT_IDS.length, HINT_IDS.join(","));
+  check("每条提示都有非空文案", HINTS.every((h) => typeof h.text === "string" && h.text.length > 6));
+  check("hintText 认识的返回文案、不认识的返回 null",
+    hintText(HINT_IDS[0]) === HINTS[0].text && hintText("nope") === null && hintText(undefined) === null);
+  check("武器互斥表恰好是三类（护盾不在其中——那是独立槽）",
+    WEAPON_TYPES.length === 3 && !WEAPON_TYPES.includes("shield")
+    && ["scatter", "laser", "mine"].every((t) => WEAPON_TYPES.includes(t)));
+
+  // —— 存档宽松校验 + 往返幂等 ——
+  check("normalizeSeen 容错（非数组/脏值/未知 id/重复一律过滤）",
+    normalizeSeen(null).length === 0 && normalizeSeen("x").length === 0
+    && normalizeSeen([1, null, {}, "nope"]).length === 0
+    && normalizeSeen([HINT_IDS[0], HINT_IDS[0]]).length === 1);
+  {
+    // 规范化成「按表顺序」之后写盘→读回是幂等的，否则 settings 的往返会来回抖
+    const once = normalizeSeen([HINT_IDS[1], HINT_IDS[0]]);
+    check("normalizeSeen 幂等且顺序确定（按表序，不按存档序）",
+      JSON.stringify(normalizeSeen(once)) === JSON.stringify(once)
+      && once[0] === HINT_IDS[0], once.join(","));
+  }
+
+  // —— 一次性语义 ——
+  {
+    const id = HINT_IDS[0];
+    check("没见过就该弹、未知 id 永不弹",
+      shouldShow(id, []) === true && shouldShow("nope", []) === false
+      && shouldShow(id, null) === true);
+    const seen = markSeen(id, []);
+    check("标记后就不再弹", seen.includes(id) && shouldShow(id, seen) === false);
+    // 纯函数：不许改入参（main 靠「返回的是不是同一份」判断要不要写盘）
+    const before = [];
+    markSeen(id, before);
+    check("markSeen 不改入参（纯函数）", before.length === 0);
+    check("重复标记不会产生重复项", markSeen(id, seen).length === seen.length);
+    check("标记未知 id 不改变集合", markSeen("nope", seen).length === seen.length);
+  }
+
+  // —— 顶掉判定的真值表（这条提示的全部正确性都在这里）——
+  {
+    const tank = (s, l, m) => ({ scatterShots: s, laserShots: l, mineCharges: m });
+    check("weaponHeld 认出三类与空手",
+      weaponHeld(tank(2, 0, 0)) === "scatter" && weaponHeld(tank(0, 1, 0)) === "laser"
+      && weaponHeld(tank(0, 0, 2)) === "mine" && weaponHeld(tank(0, 0, 0)) === null
+      && weaponHeld(null) === null);
+    check("异类拾取算顶掉", isWeaponSwap("laser", "scatter") === true);
+    check("同类叠加不算顶掉（那是加量）", isWeaponSwap("scatter", "scatter") === false);
+    check("空手拾取不算顶掉", isWeaponSwap(null, "laser") === false);
+    check("捡护盾永不算顶掉（独立槽）",
+      isWeaponSwap("laser", "shield") === false && isWeaponSwap(null, "shield") === false);
+  }
+
+  // —— 结构护栏：每条提示都必须真的被接线 ——
+  // 一条没有任何触发点的提示是**静默死码**：表里有、文案写得好好的，但永远不会弹，
+  // 而没有任何现象能暴露它（与阶段 28.2 的 TANK.speed 同一族）。所以用静态扫描
+  // 把「表」与「接线」钉在一起：加一条提示却忘了找地方触发它，这里就红。
+  {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, join } = await import("node:path");
+    const ROOT3 = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const mainSrc = readFileSync(join(ROOT3, "src", "main.js"), "utf8");
+    const unwired = HINT_IDS.filter((id) => !mainSrc.includes(`maybeHint("${id}")`));
+    check("每条提示都有触发点（没接线的提示是静默死码）", unwired.length === 0, unwired.join(","));
+    // 反向：别触发表里没有的 id（拼错 ⇒ shouldShow 恒 false ⇒ 同样静默）
+    const called = [...mainSrc.matchAll(/maybeHint\("([^"]+)"\)/g)].map((m) => m[1]);
+    const bogus = called.filter((id) => !HINT_IDS.includes(id));
+    check("没有触发表里不存在的提示 id（拼错同样是静默无效）", bogus.length === 0, bogus.join(","));
+    // 反证：扫描面非空，否则上面两条是空断言
+    check("反证：真的扫到了触发点", called.length >= HINT_IDS.length, `${called.length} 处`);
+    // **按实体的触发点必须带 players[0] 守卫**：拾取/死亡/持雷都是「发生在某辆车身上」
+    // 的事，不排除 AI 的话敌人踩雷也会教玩家「你的跳弹会杀你」。
+    // holdZone **刻意不在此列**——守点波开波是全局事件，根本没有实体可谈
+    // （它在 beginWave 里，而 beginWave 只在 wave 模式跑，那里 players[0] 恒为人类）。
+    const PER_ENTITY = ["ricochet", "weaponSwap", "laserSeen", "mineTimeout"];
+    const unguarded = PER_ENTITY.filter((id) => {
+      const at = mainSrc.indexOf(`maybeHint("${id}")`);
+      return at < 0 || !/players\[0\]/.test(mainSrc.slice(Math.max(0, at - 500), at));
+    });
+    check("按实体的触发点都带 players[0] 守卫（否则 AI 的动作也会教玩家）",
+      unguarded.length === 0, unguarded.join(","));
+    // 反证：这条扫描真的能抓住缺守卫的情况——holdZone 就是一个无守卫的例子，
+    // 把它放进 PER_ENTITY 必须判红，否则上面那条是永绿的空断言
+    const holdAt = mainSrc.indexOf('maybeHint("holdZone")');
+    check("反证：同一扫描对无守卫的触发点确实判红",
+      holdAt >= 0 && !/players\[0\]/.test(mainSrc.slice(Math.max(0, holdAt - 500), holdAt)));
+  }
+
+  // —— 旋钮与排版 ——
+  check("HINT 旋钮区间合理（时长够读完一行、队列上限有界）",
+    HINT.duration >= 2.5 && HINT.duration <= 8 && HINT.maxQueue >= 1 && HINT.maxQueue <= 6,
+    `duration=${HINT.duration} maxQueue=${HINT.maxQueue}`);
+  {
+    const { renderHintToast, hintToastBand } = await import("../src/ui.js");
+    const band = hintToastBand();
+    // 底部那一带已被占掉两处：左下「强化」条 y=height−42（跨 ±10）、
+    // 底部中央「Esc 退出对战」 y=height−16。提示条不许叠上任何一处。
+    const upgradeBar = { top: CANVAS.height - 52, bottom: CANVAS.height - 32 };
+    const footer = { top: CANVAS.height - 24, bottom: CANVAS.height - 8 };
+    const overlaps = (a, b) => a.top < b.bottom && b.top < a.bottom;
+    check("提示条不叠左下「强化」条", !overlaps(band, upgradeBar),
+      `提示 ${band.top}..${band.bottom} vs 强化 ${upgradeBar.top}..${upgradeBar.bottom}`);
+    check("提示条不叠底部「Esc 退出对战」", !overlaps(band, footer));
+    check("提示条整条落在画布内", band.top >= 0 && band.bottom <= CANVAS.height);
+
+    // Proxy 录音机：画得出文字、坐标在画布内；空文案什么都不画
+    const drawn = [];
+    const tctx = new Proxy({}, {
+      get(_t, k) {
+        if (k === "measureText") return (s) => ({ width: s.length * 12 });
+        if (k === "fillText") return (text, x, y) => drawn.push({ text, x, y });
+        return () => {};
+      },
+      set() { return true; },
+    });
+    renderHintToast(tctx, hintText(HINT_IDS[0]));
+    check("提示条画出了文案且坐标在画布内",
+      drawn.length === 1 && drawn[0].text === HINTS[0].text
+      && drawn[0].x > 0 && drawn[0].x < CANVAS.width
+      && drawn[0].y > 0 && drawn[0].y < CANVAS.height);
+    drawn.length = 0;
+    renderHintToast(tctx, null);
+    renderHintToast(tctx, "");
+    check("空文案不画任何东西（调用方不必先判）", drawn.length === 0);
+  }
+  {
+    // 行宽：药丸宽度 = 文字实测 + 2×padX，钳在 maxW=620 ⇒ 文字可用 584px。
+    // node 没有 measureText，沿用说明页那条标定（全角 1 字宽 ≈ 13.72px，
+    // 由「旧地雷行 36.80 字宽 = 实机 504.85px」反推）。
+    const estW = (s) => [...s].reduce((w, ch) => w + (/[⺀-￿　-〿＀-￯]/.test(ch) ? 1 : 0.56), 0);
+    const PX = 504.85 / 36.80;
+    const budget = 620 - 18 * 2;
+    const widest = HINTS.reduce((a, h) => Math.max(a, estW(h.text) * PX), 0);
+    check(`每条提示都放得进药丸（最宽 ${widest.toFixed(0)}px / 可用 ${budget}px）`,
+      widest <= budget, HINTS.map((h) => (estW(h.text) * PX).toFixed(0)).join(","));
+  }
+}
+
+// ============================================================
 section("设置加载期校验 (settings)");
 {
   // settings.js 平时是浏览器专属（摸 localStorage），但它对存储的访问全在 try 里，
@@ -2104,7 +2252,7 @@ section("设置加载期校验 (settings)");
     setItem: (k, v) => store.set(k, String(v)),
     removeItem: (k) => store.delete(k),
   };
-  const { initSettings } = await import("../src/settings.js");
+  const { initSettings, saveBindings } = await import("../src/settings.js");
 
   // 造一份「前进被绑成 KeyR」的存量存档——黑名单扩容之前的玩家就是这个状态。
   // 只堵改键面板的捕获路径的话，这份存档重启后照旧把 R 装回去，而结算横幅上
@@ -2212,6 +2360,31 @@ section("设置加载期校验 (settings)");
 
   // 还原全局表，别把污染带给后面的 section
   snapshot.forEach((b, i) => Object.assign(KEY_BINDINGS[i], b));
+
+  // —— 提示已读列表的往返（阶段 28.5）——
+  // 一次性提示的全部价值就是「只弹一次」，所以读写必须真的闭环。
+  // 这里用的是同一个内存 stub，驱动的是真实的 loadHintsSeen/saveHintsSeen。
+  {
+    const { loadHintsSeen, saveHintsSeen } = await import("../src/settings.js");
+    const { normalizeSeen, HINT_IDS } = await import("../src/hints.js");
+    store.delete("tank-trouble.settings.v1");
+    check("没存过时返回 null（调用方交给 normalizeSeen 落空集）", loadHintsSeen() === null);
+    saveHintsSeen([HINT_IDS[1], HINT_IDS[0]]);
+    const back = normalizeSeen(loadHintsSeen());
+    check("写盘→读回→规范化，内容与顺序都稳定",
+      back.length === 2 && back[0] === HINT_IDS[0] && back[1] === HINT_IDS[1], back.join(","));
+    // 读-改-写合并：写提示不许把键位那些字段冲掉（settings 的既有纪律）
+    saveBindings();
+    saveHintsSeen([HINT_IDS[0]]);
+    const raw = JSON.parse(store.get("tank-trouble.settings.v1"));
+    check("写提示不冲掉同一份存档里的键位（读-改-写合并）",
+      Array.isArray(raw.bindings) && raw.bindings.length === 2
+      && Array.isArray(raw.hintsSeen) && raw.hintsSeen.length === 1);
+    // 坏档不抛：非数组一律当没存过
+    store.set("tank-trouble.settings.v1", JSON.stringify({ version: 1, hintsSeen: "oops" }));
+    check("hintsSeen 坏档当没存过（不抛）", loadHintsSeen() === null);
+  }
+
   delete globalThis.localStorage;
 }
 

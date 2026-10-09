@@ -1375,3 +1375,45 @@ export function renderUpgradeBar(ctx, taken) {
   ctx.restore();
 }
 
+
+// —— 上下文一次性提示条（阶段 28.5）——
+// 位置是算过的，不是看着放的：底部那一带已经被占掉两处——左下「强化」条在
+// y = height−42（跨 668..688），底部中央「Esc 退出对战」在 y = height−16。
+// 提示条取 y = height−80（跨 624..656），与「强化」条留 12px，不叠任何一处。
+// 刻意**不放正中**：那里是 3-2-1 大数字与 GO 余像，而提示最可能在交战瞬间弹出。
+const HINT_TOAST = { y: CANVAS.height - 80, h: 32, padX: 18, maxW: 620 };
+
+// 画一条提示。只画东西、不碰状态（计时与排队都在 main）。
+// text 为空则什么都不画，调用方不必先判。
+export function renderHintToast(ctx, text) {
+  if (!text) return;
+  const cx = CANVAS.width / 2;
+  const t = HINT_TOAST;
+
+  ctx.save();
+  ctx.font = "14px system-ui, 'Microsoft YaHei', sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  // 宽度按文字实测 + 内边距，并钳到 maxW：文案长到离谱时宁可两头贴边也别画出画布
+  const w = Math.min(t.maxW, ctx.measureText(text).width + t.padX * 2);
+
+  // 底：半透明深色 + accent 细描边。要压在竞技场上还看得清，所以不能用 pageBg
+  ctx.fillStyle = "rgba(43,43,51,0.82)";
+  roundRect(ctx, cx - w / 2, t.y - t.h / 2, w, t.h, t.h / 2);
+  ctx.fill();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = THEME.accent;
+  roundRect(ctx, cx - w / 2, t.y - t.h / 2, w, t.h, t.h / 2);
+  ctx.stroke();
+
+  ctx.fillStyle = "#f2f2f5";
+  ctx.fillText(text, cx, t.y);
+  ctx.restore();
+}
+
+// 提示条占的纵向带（供 smoke 断言它不与底部既有 HUD 元素重叠）。
+// 导出一个**查询**而不是导出常量：常量会被别处拿去当布局依据，而这里只想让
+// 测试能问「你占了哪一段」——与 zone.js 用纯查询暴露几何是同一条纪律。
+export function hintToastBand() {
+  return { top: HINT_TOAST.y - HINT_TOAST.h / 2, bottom: HINT_TOAST.y + HINT_TOAST.h / 2 };
+}
