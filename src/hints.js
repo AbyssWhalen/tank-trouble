@@ -102,3 +102,20 @@ export function isWeaponSwap(heldBefore, pickedType) {
     && heldBefore !== null
     && heldBefore !== pickedType;
 }
+
+// 弹丸类武器。**只有这两类**适用「自己的跳弹会打死自己」这条提示：
+// 出膛宽限只保护**未反弹**的弹，所以「被自己的子弹/散射打死」恒等于
+// 「被自己的跳弹打死」，文案可以直说跳弹。
+export const RICOCHET_WEAPONS = Object.freeze(["bullet", "scatter"]);
+
+// 这次死亡是否是「被自己的跳弹打死」。
+// **必须按武器分流，不能只看「凶手是不是自己」**：`hitPlayer` 有三个调用者，
+// 地雷传 `m.owner`、激光传 `shooter.tank`，于是踩自己的雷、或贴墙开激光被反弹段
+// 扫回来，都同样满足「凶手 === 受害者」。用跳弹的文案去讲那两件事不只是说错——
+// 一次性提示当场写盘，**讲错一次就永远没机会讲对了**。
+// （雷不认主人在玩法说明页里；贴墙激光会弹回来暂时没有提示，见 CLAUDE.md）
+export function isRicochetSelfKill(weapon, killerTank, victimTank) {
+  return RICOCHET_WEAPONS.includes(weapon)
+    && !!killerTank
+    && killerTank === victimTank;
+}

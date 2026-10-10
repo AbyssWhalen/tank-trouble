@@ -2257,6 +2257,63 @@ section("上下文一次性提示 (hints)");
     check(`每条提示都放得进药丸（最宽 ${widest.toFixed(0)}px / 可用 ${budget}px）`,
       widest <= budget, HINTS.map((h) => (estW(h.text) * PX).toFixed(0)).join(","));
   }
+  // —— 跳弹自杀的判据必须按武器分流（28.5 的回归，自己写出来的）——
+  // `hitPlayer` 有三个调用者：子弹传 `b.owner`、地雷传 `m.owner`、激光传
+  // `shooter.tank`。只看「凶手 === 受害者」会把「踩自己的雷」和「贴墙激光被反弹段
+  // 扫回来」也判成跳弹，而提示是**一次性且当场写盘**的 ⇒ 讲错一次就永远没机会讲对。
+  {
+    const { isRicochetSelfKill, RICOCHET_WEAPONS } = await import("../src/hints.js");
+    const me = { id: "me" };
+    const foe = { id: "foe" };
+    check("弹丸类表恰好是子弹与散射（激光/地雷不在其中）",
+      RICOCHET_WEAPONS.length === 2 && RICOCHET_WEAPONS.includes("bullet")
+      && RICOCHET_WEAPONS.includes("scatter")
+      && !RICOCHET_WEAPONS.includes("laser") && !RICOCHET_WEAPONS.includes("mine"));
+    check("自己的子弹/散射打死自己 → 算跳弹自杀",
+      isRicochetSelfKill("bullet", me, me) === true
+      && isRicochetSelfKill("scatter", me, me) === true);
+    check("踩自己的雷 / 贴墙激光弹回来 → **不**算跳弹自杀（那是两件别的事）",
+      isRicochetSelfKill("mine", me, me) === false
+      && isRicochetSelfKill("laser", me, me) === false);
+    check("被别人的子弹打死 → 不算自杀",
+      isRicochetSelfKill("bullet", foe, me) === false);
+    check("凶手为 null（无主弹/无主爆）不算自杀，也不抛",
+      isRicochetSelfKill("bullet", null, me) === false
+      && isRicochetSelfKill("bullet", undefined, me) === false);
+  }
+
+  // —— 结构护栏：提示层那两处「两半必须一致」的地方 ——
+  {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, join } = await import("node:path");
+    const ROOT5 = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const mainSrc = readFileSync(join(ROOT5, "src", "main.js"), "utf8").replace(/\r\n/g, "\n");
+
+    // ① 跳弹触发必须走 isRicochetSelfKill,不许裸写「凶手 === 自己」
+    const ricoLine = mainSrc.split("\n").find((l) => l.includes('maybeHint("ricochet")'));
+    check("跳弹提示的触发走 isRicochetSelfKill（不是裸比凶手）",
+      !!ricoLine && ricoLine.includes("isRicochetSelfKill"), (ricoLine || "").trim().slice(0, 70));
+
+    // ② 可见性判据只许有一处：计时与渲染都来问 hintsVisible()。
+    // 它们分开写时，「暂停去读提示」会让一条永不再现的提示凭空消失。
+    const defs = (mainSrc.match(/function hintsVisible\(\)/g) || []).length;
+    const uses = (mainSrc.match(/hintsVisible\(\)/g) || []).length;
+    check("hintsVisible 只定义一次，且至少被两处消费（计时 + 渲染）",
+      defs === 1 && uses >= 3, `定义 ${defs} 次 / 出现 ${uses} 次`);
+    // advanceHints 的函数体里必须问它（否则看不见也在走表）
+    const advBody = mainSrc.split("\nfunction advanceHints")[1] || "";
+    check("advanceHints 开头就问可见性（看不见不走表、不出队）",
+      /hintsVisible\(\)/.test(advBody.slice(0, 400)));
+    // 渲染那一处不许再写一份状态比较（那正是两半漂开的方式）。
+    // **按 renderHintToast 的调用点往前取**：早一版按 "hintNow &&" 找行，结果
+    // 匹配到了 advanceHints 里的 `!hintNow && hintQueue.length`——断言在看另一处代码。
+    const callAt = mainSrc.indexOf("renderHintToast(ctx");
+    const gate = callAt >= 0 ? mainSrc.slice(Math.max(0, callAt - 200), callAt) : "";
+    check("渲染门不内联状态比较，只读 hintsVisible()",
+      callAt >= 0 && /hintNow && hintsVisible\(\)/.test(gate) && !/STATE\.PAUSED/.test(gate),
+      gate.split("\n").pop().trim().slice(0, 70));
+  }
 }
 
 // ============================================================

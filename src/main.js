@@ -64,6 +64,7 @@ import {
 } from "./upgrades.js";
 import {
   hintText, normalizeSeen, shouldShow, markSeen, weaponHeld, isWeaponSwap,
+  isRicochetSelfKill,
 } from "./hints.js";
 import { initAudio, playSfx, toggleMuted, isMuted } from "./audio.js";
 import {
@@ -709,7 +710,16 @@ function maybeHint(id) {
 // **刻意不随转场清空**：最该被看见的那条（跳弹自杀）恰好在死亡那一刻触发，
 // 而死亡紧接着就是 ROUND_OVER / WAVE_OVER 转场——照「转场排空」的惯例清掉队列，
 // 这条提示就永远看不见。它只是一行 4.5 秒的字，跨过一次转场无害。
+// 提示条的可见性判据**只有这一处**：时钟与渲染必须读同一个谓词。
+// 分开写的后果很具体——提示弹出时玩家按 Esc 想停下来读，PAUSED 下不画它但计时
+// 照走，4.5 秒后这条**一次性且已写盘**的提示就永远消失了。这与「清 effects 必须
+// 同时排空震动」是同一族缺陷：两半必须一致，所以只留一份、两边都来问它。
+function hintsVisible() {
+  return state !== STATE.MENU && state !== STATE.PAUSED;
+}
+
 function advanceHints(dt) {
+  if (!hintsVisible()) return; // 看不见就不走表、也不出队（见 hintsVisible）
   if (hintTimer > 0) {
     hintTimer = Math.max(0, hintTimer - dt);
     if (hintTimer === 0) hintNow = null;
@@ -736,10 +746,12 @@ function hitPlayer(p, weapon, killerTank) {
     return false;
   }
   p.tank.alive = false;
-  // 被**自己的**弹打死：这是新玩家的第一死因，而画面上没有任何东西说明
-  // 「反弹后的子弹不认主人」。出膛宽限保证未反弹的弹打不到自己，所以
-  // 「自己打死自己」实际上恒等于「被自己的跳弹打死」，文案可以直说跳弹。
-  if (p === players[0] && killerTank === p.tank) maybeHint("ricochet");
+  // 被**自己的跳弹**打死：新玩家的第一死因，而画面上没有任何东西说明
+  // 「反弹后的子弹不认主人」。**判据必须按武器分流**（见 hints.isRicochetSelfKill）：
+  // `hitPlayer` 有三个调用者，地雷传 `m.owner`、激光传 `shooter.tank`，所以只看
+  // 「凶手 === 自己」会把「踩自己的雷」和「贴墙激光弹回来」也算成跳弹——而一次性
+  // 提示当场写盘，讲错一次就永远没机会讲对。
+  if (p === players[0] && isRicochetSelfKill(weapon, killerTank, p.tank)) maybeHint("ricochet");
   effects.push(new TankExplosion(p.tank.x, p.tank.y, p.color));
   addShake(5, 0.3);
   playSfx("kill");
@@ -1514,8 +1526,9 @@ function render() {
   // 提示条画在**最后、switch 之外**：它要跨状态活着。
   // 最该被看见的那条（跳弹自杀）在死亡那一刻触发，而死亡紧接着就是
   // ROUND_OVER / LEVEL_OVER / WAVE_OVER——只在 PLAYING 里画它就等于永远看不见。
-  // 排除 MENU（提示是对局内容）与 PAUSED（整屏遮罩，底下什么都不该露）。
-  if (hintNow && state !== STATE.MENU && state !== STATE.PAUSED) {
+  // 排除 MENU（提示是对局内容）与 PAUSED（整屏遮罩，底下什么都不该露）——
+  // 判据与计时共用 hintsVisible()，**不许在这里再写一份状态比较**。
+  if (hintNow && hintsVisible()) {
     renderHintToast(ctx, hintText(hintNow));
   }
 }
