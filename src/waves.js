@@ -25,7 +25,7 @@
 // 「这一波要你做什么」——章尾 boss 波把「打光敌人」换成「站住一块地」。
 // ============================================================
 
-import { WAVE, TIER_POOL_BY_MODE, CELL_SIZE, TANK, ENEMY_TRAIT, HOLD } from "./config.js";
+import { WAVE, TIER_POOL_BY_MODE, CELL_SIZE, TANK, ENEMY_TRAIT, HOLD, POWERUP } from "./config.js";
 import { resolveCircleWalls } from "./collision.js";
 
 // 三档权重的固定枚举顺序（对象字面量插入序即此序，加权抽取才确定）
@@ -115,7 +115,17 @@ export function shouldRemap(n) {
 //   hero     玩家坦克位置（距离基准）
 //   occupied 场上所有坦克（含玩家）——不许贴脸空降
 // 找不到合法点返回 null（图挤到连 1 格安全距都腾不出来，调用方下帧再试）。
-export function pickSpawnSpot(maze, hero, occupied, rand = Math.random) {
+// avoid: 需要**小净空**的额外障碍（开波补给）。与 occupied 分开是刻意的：
+//   occupied（坦克）走「不许贴脸」的门，逐级 2.2→1.5→1 格；
+//   avoid（道具）只需要「别刷在同一格上」，净空 = 拾取圈 + 车身半径。
+// 混成一条判据会同时改掉「刷点离玩家多远」这个被跑分基线盯着的量。
+//
+// **为什么必须避**：敌人落在补给正上方，下一帧拾取循环就把它吃掉——
+// 白拿一件武器只是表象，真正的问题是 `applyElite` 刚发下去的**确定性**词条
+// 会被 applyPowerup 的「异类清旧换新」静默抹掉。而「同波同档恒等」是刻意的
+// 设计（玩家能学会「第 21 波起场上有一把激光」），被随机拾取破坏就不是可学会
+// 的了；顺带还会让同屏上膛激光数超出 laserQuota（它是投放时数一次、之后不复查）。
+export function pickSpawnSpot(maze, hero, occupied, rand = Math.random, avoid = []) {
   const cells = [];
   for (let cy = 0; cy < maze.rows; cy++) {
     for (let cx = 0; cx < maze.cols; cx++) {
@@ -127,6 +137,9 @@ export function pickSpawnSpot(maze, hero, occupied, rand = Math.random) {
       const near = occupied.length
         ? Math.min(...occupied.map((o) => Math.hypot(o.x - x, o.y - y)))
         : Infinity;
+      // 小净空：离任一补给太近的格直接不参与（至多排除它自己那一格）
+      const avoidClear = POWERUP.radius + TANK.radius;
+      if (avoid.some((o) => Math.hypot(o.x - x, o.y - y) < avoidClear)) continue;
       cells.push({ x, y, near, far: Math.hypot(hero.x - x, hero.y - y) });
     }
   }

@@ -843,7 +843,7 @@ function updatePlaying(dt) {
   // 2.7) 道具：刷新推进 + 拾取检测。
   //      刷新器到点在空格刷一个（避开墙/坦克），场上数受 maxOnField 限流。
   //      拾取：存活坦克碾到道具圈 → 应用效果 + 移除道具 + 播拾取闪光。
-  spawner.update(dt, maze, powerups, aliveTanks);
+  spawner.update(dt, maze, powerups, aliveTanks, mines);
   for (const p of players) {
     if (!p.alive) continue;
     for (const pw of powerups) {
@@ -862,6 +862,11 @@ function updatePlaying(dt) {
         pw.taken = true; // 标记，循环后统一过滤（避免边遍历边删）
         effects.push(new PickupFlash(pw.x, pw.y, pw.type));
         playSfx("pickup", { rate: PICKUP_RATE[pw.type] ?? 1 });
+        // **一帧只吃一个**（阶段 28.6）：两个道具圆心距只要 < 2×拾取圈=32px，
+        // 站在中间的车同帧同时吃到两个，而 applyPowerup 是「异类清旧换新」——
+        // 于是第二个会把第一个刚装上的武器槽静默销毁。玩家看到的是「捡了两个
+        // 却只剩一个」，而两个道具本来就不该叠在那点距离内（由 pickSpot 把着）。
+        break;
       }
     }
   }
@@ -1198,7 +1203,7 @@ function beginWave(n) {
   spawner.cap = fieldCapOf(mods);
   const tanks = players.filter((p) => p.alive).map((p) => p.tank);
   const supply = supplyCountOf(spec, mods);
-  for (let i = 0; i < supply; i++) spawner.forceSpawn(maze, powerups, tanks);
+  for (let i = 0; i < supply; i++) spawner.forceSpawn(maze, powerups, tanks, mines);
 }
 
 // 在当前地图上挑一个守点区域（选点纯函数在 zone.js）。挑不出来返回 null——
@@ -1252,7 +1257,12 @@ function spawnWaveEnemy(spec) {
   const used = new Set(players.slice(1).map((p) => p.index));
   let slot = 1;
   while (used.has(slot) && slot < ENEMY_COLORS.length) slot++;
-  const spot = pickSpawnSpot(maze, hero, players.filter((p) => p.alive).map((p) => p.tank));
+  const spot = pickSpawnSpot(
+    maze, hero,
+    players.filter((p) => p.alive).map((p) => p.tank),
+    Math.random,
+    powerups, // 小净空：别刷在开波补给上（见 waves.pickSpawnSpot 的理由）
+  );
   if (!spot) return; // 图太挤（理论上不会）：本帧跳过，下帧再试
   const level = pickEnemyLevel(spec.mix);
   const angle = Math.atan2(hero.y - spot.y, hero.x - spot.x);

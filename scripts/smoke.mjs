@@ -2317,6 +2317,149 @@ section("上下文一次性提示 (hints)");
 }
 
 // ============================================================
+section("投放与拾取的接缝 (阶段 28.6)");
+{
+  const { PowerupSpawner, Powerup, TYPE_BG } = await import("../src/powerup.js");
+  const { pickSpawnSpot } = await import("../src/waves.js");
+  const { Mine } = await import("../src/mine.js");
+  const { TANK, POWERUP, MAZE_STYLES, WALL_DENSITY, WAVE } = await import("../src/config.js");
+
+  // —— ① pickSpot 必须避雷 ——
+  // 警戒后的雷完全隐形（mine.visibility），补给刷进触发圈 = 一个看起来白捡、
+  // 走过去必死的诱饵，而且玩家读不出原因。AI 读 world.mines 有完美记忆所以免疫，
+  // **只坑真人**——这正是最该有门的一类。
+  {
+    const mz = generateMaze(MAZE_TIERS.small.cols, MAZE_TIERS.small.rows, "sparse");
+    const cy = Math.floor(mz.rows / 2), cx = Math.floor(mz.cols / 2);
+    const mine = new Mine((cx + 0.5) * CELL_SIZE, (cy + 0.5) * CELL_SIZE, null);
+    const sp = new PowerupSpawner(["shield"]);
+    const clearWant = POWERUP.mine.triggerRadius + POWERUP.radius;
+    let hits = 0, produced = 0;
+    for (let i = 0; i < 200; i++) {
+      const spot = sp.pickSpot(mz, [], [], [mine]);
+      if (!spot) continue;
+      produced++;
+      if (Math.hypot(spot.x - mine.x, spot.y - mine.y) < clearWant) hits++;
+    }
+    check("反证：pickSpot 确实产出了点（不是空跑）", produced >= 150, `${produced}/200`);
+    check("pickSpot 不把道具刷进地雷的触发圈（隐形雷 + 诱饵 = 讲不清的死）",
+      hits === 0, `${hits} 例落在 ${clearWant}px 内`);
+    // 反向：不给 mines 时它确实会落在那一格上——否则上一条是永绿的空断言
+    let hitsNoMine = 0;
+    for (let i = 0; i < 200; i++) {
+      const spot = sp.pickSpot(mz, [], []);
+      if (spot && Math.hypot(spot.x - mine.x, spot.y - mine.y) < clearWant) hitsNoMine++;
+    }
+    check("反证：不传 mines 时同一格确实会被选中（这条门抓的是真东西）",
+      hitsNoMine > 0, `命中 ${hitsNoMine}/200`);
+  }
+
+  // —— ② 敌人刷点的小净空（避补给）——
+  // 不传 avoid 时那一格会被选中；传了就必须避开。同时确认净空**只**排除那一格，
+  // 不会像 occupied 那样大改分布（那会推翻 CLAUDE.md 里的波次基线）。
+  //
+  // **反证要先把「本来会被选中的格子」扫出来**：pickSpawnSpot 只从「离理想距离
+  // 最近的三分之一」里挑，随手拿地图正中当靶子的话它本来就不在候选池里——
+  // 那样「不传 avoid 也选不中」是必然的，反证会变成永假的空断言（初版就踩了）。
+  {
+    const mz = generateMaze(MAZE_TIERS.medium.cols, MAZE_TIERS.medium.rows, "sparse");
+    const hero = { x: CELL_SIZE * 0.5, y: CELL_SIZE * 0.5 };
+    const cellOf = (s) => `${Math.floor(s.x / CELL_SIZE)},${Math.floor(s.y / CELL_SIZE)}`;
+
+    // 第一遍：不传 avoid，统计哪些格真的会被选中
+    const tally = new Map();
+    for (let i = 0; i < 400; i++) {
+      const s = pickSpawnSpot(mz, hero, [], () => i / 400);
+      if (s) tally.set(cellOf(s), (tally.get(cellOf(s)) || 0) + 1);
+    }
+    const top = [...tally.entries()].sort((a, b) => b[1] - a[1])[0];
+    check("反证前置：扫出了会被选中的格子（候选池非空）", !!top && top[1] > 0,
+      top ? `${top[0]} ×${top[1]}` : "无");
+
+    if (top) {
+      const [ccx, ccy] = top[0].split(",").map(Number);
+      const marked = { x: (ccx + 0.5) * CELL_SIZE, y: (ccy + 0.5) * CELL_SIZE };
+      const clearAvoid = POWERUP.radius + TANK.radius;
+      let withAvoid = 0, without = 0, tooClose = 0;
+      for (let i = 0; i < 400; i++) {
+        const r = i / 400;
+        const s1 = pickSpawnSpot(mz, hero, [], () => r, [marked]);
+        const s2 = pickSpawnSpot(mz, hero, [], () => r);
+        if (s1 && cellOf(s1) === top[0]) withAvoid++;
+        if (s2 && cellOf(s2) === top[0]) without++;
+        if (s1 && Math.hypot(s1.x - marked.x, s1.y - marked.y) < clearAvoid) tooClose++;
+      }
+      check("敌人刷点避开补给所在格（applyElite 的确定性词条不该被随机拾取抹掉）",
+        withAvoid === 0 && tooClose === 0, `avoid 命中 ${withAvoid} / 过近 ${tooClose}`);
+      check("反证：同一格不传 avoid 时确实会被选中（净空不是空断言）",
+        without > 0, `无 avoid 命中 ${without}/400`);
+      check("净空很小：occupied 的贴脸门保持不变（没把两件事混成一条判据）",
+        WAVE.spawnSafeCells * CELL_SIZE > clearAvoid * 5,
+        `净空 ${clearAvoid}px vs 贴脸门 ${WAVE.spawnSafeCells * CELL_SIZE}px`);
+    }
+  }
+
+  // —— ③ 结构护栏：一帧只吃一个（两份副本必须同改）——
+  {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, join } = await import("node:path");
+    const R = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const grab = (p) => readFileSync(join(R, p), "utf8").replace(/\r\n/g, "\n");
+    for (const [f, label] of [["src/main.js", "main"], ["scripts/arena.mjs", "arena"]]) {
+      const src = grab(f);
+      const at = src.indexOf("pw.taken = true;");
+      const win = at >= 0 ? src.slice(at, at + 400) : "";
+      check(`${label}: 拾取后 break（否则同帧双吃会静默销毁刚装上的武器槽）`,
+        at >= 0 && /pw\.taken = true;[\s\S]{0,400}?\bbreak;/.test(win));
+    }
+  }
+
+  // —— ④ 结构护栏：四处「两处各写一遍」都收成了单一来源 ——
+  {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, join } = await import("node:path");
+    const R2 = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const src = (p) => readFileSync(join(R2, p), "utf8").replace(/\r\n/g, "\n");
+
+    // 死旋钮：sparse 的密度必须与生成器读的是同一个来源。
+    // **判据用 import 语句而不是裸文本**：初版写成 `!/WALL_DENSITY/.test(整个文件)`，
+    // 而那段解释「不直读 WALL_DENSITY」的注释里就有这个词——扫描把注释也算进去了。
+    // 注释不是代码，这类假红与「测空气」是同一族（都在测你以为自己在测的东西之外）。
+    const mazeSrc = src("src/maze.js");
+    const mazeImport = (mazeSrc.split("\n").find((l) => /^import .*from "\.\/config\.js";/.test(l)) || "");
+    check("sparse 密度不是死旋钮（风格表与 WALL_DENSITY 同源）",
+      MAZE_STYLES.sparse.density === WALL_DENSITY,
+      `sparse=${MAZE_STYLES.sparse.density} WALL_DENSITY=${WALL_DENSITY}`);
+    check("maze.js 不再从 config 导入 WALL_DENSITY（否则改风格表零效果）",
+      !/WALL_DENSITY/.test(mazeImport) && /MAZE_STYLES\.sparse\.density/.test(mazeSrc),
+      mazeImport.trim().slice(0, 80));
+
+    // 道具色表只此一份
+    check("effects.js 不再抄第二份道具色表（复用 powerup.TYPE_BG）",
+      /TYPE_BG/.test(src("src/effects.js"))
+      && !/powShieldBg:/.test(src("src/effects.js"))
+      && !/scatter: THEME\.powScatterBg/.test(src("src/effects.js")));
+
+    // 地雷冲击环半径接常量，不写死
+    check("地雷爆炸环半径接 POWERUP 常量（不写死 70）",
+      /POWERUP\.mine\.blastRadius/.test(src("src/effects.js")) && !/12 \+ p \* 58/.test(src("src/effects.js")));
+
+    // 护盾闪烁阈值两处共读
+    check("护盾闪烁阈值两处共读 POWERUP.shield.blinkUnder",
+      /blinkUnder/.test(src("src/tank.js")) && /blinkUnder/.test(src("src/ui.js"))
+      && !/shieldTimer < 1\.5/.test(src("src/tank.js"))
+      && !/shieldTimer < 1\.5/.test(src("src/ui.js")));
+
+    // arena 参数校验（未知类型必须拒绝，而不是静默刷出零效力道具）
+    check("arena --powerups 校验类型（未知值报错退出，不静默失真）",
+      /POWERUP\.types\.includes\(t\)/.test(src("scripts/arena.mjs"))
+      && /process\.exit\(1\)/.test(src("scripts/arena.mjs")));
+  }
+}
+
+// ============================================================
 section("设置加载期校验 (settings)");
 {
   // settings.js 平时是浏览器专属（摸 localStorage），但它对存储的访问全在 try 里，

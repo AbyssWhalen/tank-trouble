@@ -965,8 +965,10 @@ function renderWeaponBadges(ctx, tank, bx, y, step) {
   }
 
   if (tank.shield) {
-    // 快到期闪烁阈值与坦克自身护盾环一致（<1.5s），两处视觉同步
-    const blink = tank.shieldTimer < 1.5 ? 0.35 + 0.5 * Math.abs(Math.sin(tank.shieldTimer * 8)) : undefined;
+    // 快到期闪烁阈值与坦克自身护盾环**共读同一个常量**——原先两处各硬编码 1.5，
+    // 这句注释却声称「两处视觉同步」：同步靠人记，改一处就漂
+    const blink = tank.shieldTimer < POWERUP.shield.blinkUnder
+      ? 0.35 + 0.5 * Math.abs(Math.sin(tank.shieldTimer * 8)) : undefined;
     badge("shield", undefined, blink);
   }
 }

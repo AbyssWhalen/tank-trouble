@@ -8,7 +8,8 @@
 // 联机 v2 直接复用：死亡有反馈而非凭空消失。
 // ============================================================
 
-import { EXPLOSION, WALL_BREAK, WALL, THEME, TANK } from "./config.js";
+import { EXPLOSION, WALL_BREAK, WALL, THEME, TANK, POWERUP } from "./config.js";
+import { TYPE_BG } from "./powerup.js";
 
 // ============================================================
 // 屏幕震动 —— 模块级单例（同时只有一段震动，新震动与旧震动取剩余强度大者）。
@@ -338,12 +339,15 @@ export class MineBlast {
     ctx.save();
     ctx.translate(this.x, this.y);
 
-    // 外圈冲击环：扩到波及半径略外，宣示杀伤范围
+    // 外圈冲击环：扩到波及半径**略外**，宣示杀伤范围。末半径接 POWERUP 的常量
+    // 而不是写死 70——原先硬编码，把 blastRadius 从 60 调小之后环会画到实际
+    // 杀伤圈之外，演出与判定不一致（而演出恰恰是玩家判断站位唯一的依据）
+    const ringEnd = POWERUP.mine.blastRadius + 10;
     ctx.globalAlpha = alpha * 0.9;
     ctx.strokeStyle = "#2f2f33";
     ctx.lineWidth = 4 * (1 - p * 0.6);
     ctx.beginPath();
-    ctx.arc(0, 0, 12 + p * 58, 0, Math.PI * 2);
+    ctx.arc(0, 0, 12 + p * (ringEnd - 12), 0, Math.PI * 2);
     ctx.stroke();
 
     // 内圈红色残光（与警戒灯同色，视觉连贯）
@@ -375,12 +379,9 @@ export class PickupFlash {
   constructor(x, y, type) {
     this.x = x;
     this.y = y;
-    const colors = {
-      scatter: THEME.powScatterBg,
-      shield: THEME.powShieldBg,
-      laser: THEME.powLaserBg,
-      mine: THEME.powMineBg,
-    };
+    // 复用 powerup.js 那份唯一色表，不抄第二份——抄一份的代价是新增道具类型时
+    // 「登记一行即可」变成「登记两处，漏一处就两个地方不同色」
+    const colors = TYPE_BG;
     this.color = colors[type] || THEME.powScatterBg;
     this.age = 0;
     this.duration = 0.3;

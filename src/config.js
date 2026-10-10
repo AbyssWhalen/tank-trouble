@@ -66,7 +66,10 @@ export const MAZE_FLOOR = {
 //             现有出生点（左上/右下角）恰好互为中心对称，天然配合
 //   rooms     房间+走廊——简化 BSP 递归二分，切缝放墙 + 相邻房间开门
 export const MAZE_STYLES = {
-  sparse:    { label: "稀疏格栅", density: 0.28 },
+  // 稀疏格栅的密度**读 WALL_DENSITY 这个唯一来源**（maze.fillSparse 读本字段）。
+  // 原先这里写死一个 0.28、而生成器读的是顶层 WALL_DENSITY，于是本字段是个
+  // **死旋钮**：改它零效果，改 WALL_DENSITY 又看不到本表跟着动。见阶段 28.6
+  sparse:    { label: "稀疏格栅", density: WALL_DENSITY },
   symmetric: { label: "对称竞技场", density: 0.30 },
   rooms:     { label: "房间走廊", roomMin: 2, roomMax: 3, extraDoorChance: 0.5 },
 };
@@ -477,6 +480,10 @@ export const POWERUP = {
   },
   shield: {
     duration: 5,          // 护盾最长持续（秒），到点自动消失防一直龟
+    // 「快到期」的闪烁阈值：**两处消费者共读这一个值**（tank.js 的车身护盾环、
+    // ui.js 的 HUD 徽章）。原先两边各硬编码 1.5，而 ui.js 的注释还写着
+    // 「与坦克自身护盾环一致」——注释承诺的同步靠人记，改一处必漂。见阶段 28.6
+    blinkUnder: 1.5,
   },
   laser: {
     shots: 1,             // 捡一次给几发激光（瞬时射线命中即杀——稀缺大招定位）

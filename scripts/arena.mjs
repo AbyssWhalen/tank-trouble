@@ -73,8 +73,21 @@ const ROUNDS = Number(opt.rounds ?? 100);
 const LEVEL_A = opt.levelA ?? opt.level ?? "normal";
 const LEVEL_B = opt.levelB ?? opt.level ?? "normal";
 const TIMEOUT = Number(opt.timeout ?? 90); // 单回合模拟时长上限（秒），到点判超时
-const TYPES = opt.powerups === "none" ? []
-  : (opt.powerups ? String(opt.powerups).split(",") : [...POWERUP.types]);
+// --powerups 的取值**必须校验**：拼错（或带空格）的类型会被刷上场，而
+// `applyPowerup` 对不认识的 type 是**静默无操作**、`drawPowerupIcon` 又会用
+// 散射色兜底画出来——于是跑分理由变成「场上有个捡了没用的东西」，
+// 而报告照原样印那串文字，读数失真且看不出来。见阶段 28.6。
+const TYPES = (() => {
+  if (opt.powerups === "none") return [];
+  if (!opt.powerups) return [...POWERUP.types];
+  const raw = String(opt.powerups).split(",").map((t) => t.trim()).filter(Boolean);
+  const bad = raw.filter((t) => !POWERUP.types.includes(t));
+  if (bad.length) {
+    console.error(`--powerups 含未知类型：${bad.join(",")}（合法值：${POWERUP.types.join(",")}）`);
+    process.exit(1);
+  }
+  return raw;
+})();
 // 地图风格：--style sparse|symmetric|rooms|all（all=每回合从 pve 池随机，同实机）
 const STYLE = opt.style ?? "sparse";
 // 地形破坏（子弹磨墙 + 地雷炸墙）：默认开，与阶段 18 之后的调参基准一致；
@@ -264,7 +277,7 @@ function simulate({ maze, actors, types, erode, timeout, onFrame, verdict }) {
     }
 
     // 2.7) 道具刷新 + 拾取
-    spawner.update(dt, maze, powerups, aliveTanks);
+    spawner.update(dt, maze, powerups, aliveTanks, mines);
     for (const p of actors) {
       if (!p.alive) continue;
       for (const pw of powerups) {
@@ -272,6 +285,7 @@ function simulate({ maze, actors, types, erode, timeout, onFrame, verdict }) {
         if (circleVsCircle(p.tank.x, p.tank.y, TANK.radius, pw.x, pw.y, POWERUP.radius)) {
           p.tank.applyPowerup(pw.type);
           pw.taken = true;
+          break; // 一帧只吃一个，与 main 同语义（见那边注释）
         }
       }
     }
@@ -553,7 +567,7 @@ function playWaves() {
     ctx.spawner.cap = fieldCapOf(hero.tank.mods);
     const tanks = actors.filter((a) => a.alive).map((a) => a.tank);
     const supply = supplyCountOf(waveSpec(n), hero.tank.mods);
-    for (let i = 0; i < supply; i++) ctx.spawner.forceSpawn(maze, ctx.powerups, tanks);
+    for (let i = 0; i < supply; i++) ctx.spawner.forceSpawn(maze, ctx.powerups, tanks, ctx.mines);
   };
 
   const onFrame = (dt, ctx) => {
@@ -624,7 +638,12 @@ function playWaves() {
     // 场上不满同屏上限且配额有余 → 补一辆（一帧只补一辆，同 main）
     const spec = waveSpec(waveNo);
     if (enemiesAlive >= spec.concurrent || quotaLeft <= 0) return;
-    const spot = pickSpawnSpot(maze, hero.tank, actors.filter((a) => a.alive).map((a) => a.tank));
+    const spot = pickSpawnSpot(
+      maze, hero.tank,
+      actors.filter((a) => a.alive).map((a) => a.tank),
+      Math.random,
+      ctx.powerups, // 同 main：小净空避开开波补给
+    );
     if (!spot) return; // 图太挤：下帧再试
     const level = pickEnemyLevel(spec.mix);
     const foe = mkActor("E", {

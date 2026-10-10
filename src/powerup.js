@@ -17,8 +17,10 @@ function randRange([min, max]) {
   return min + Math.random() * (max - min);
 }
 
-// 道具类型 → 圆底颜色（新增类型在此登记一行即可）
-const TYPE_BG = {
+// 道具类型 → 圆底颜色。**这是全游戏唯一的道具色表**（新增类型在此登记一行即可）：
+// 地上道具的圆底、HUD 徽章、以及 PickupFlash 的拾取彩环都读它。effects.js 原先
+// 自己抄了第二份，于是那句「登记一行即可」只对一半——见阶段 28.6。
+export const TYPE_BG = {
   scatter: THEME.powScatterBg,
   shield: THEME.powShieldBg,
   laser: THEME.powLaserBg,
@@ -176,8 +178,9 @@ export class PowerupSpawner {
 
   // 每帧推进。到点且场上未满则刷一个，入 powerups 数组（原地 push）。
   // maze: 当前地图（取 cols/rows/walls 选位）；powerups: 当前场上道具（数量限流）；
-  // tanks: 存活坦克数组（避开正踩在上面的位置，防一刷出来就被吃/重叠）。
-  update(dt, maze, powerups, tanks) {
+  // tanks: 存活坦克数组（避开正踩在上面的位置，防一刷出来就被吃/重叠）；
+  // mines: 场上地雷（**必须避**，见 pickSpot 里那段）。可选，缺省视为无雷。
+  update(dt, maze, powerups, tanks, mines = []) {
     if (this.types.length === 0) return;      // 道具关闭
     if (powerups.length >= this.cap) return;  // 场上已满
 
@@ -185,17 +188,17 @@ export class PowerupSpawner {
     if (this.timer > 0) return;
     this.timer = randRange(POWERUP.spawnInterval); // 重置下一次刷新计时
 
-    this.forceSpawn(maze, powerups, tanks);
+    this.forceSpawn(maze, powerups, tanks, mines);
   }
 
   // 立刻刷一个，绕开计时器（波次生存的开波补给用）。仍守 this.cap 与避位规则——
   // 补给是"多给一次机会"，不是"无视场上限流"。不重置 timer：常规刷新节奏与补给互不干扰。
   // 返回是否真刷出来了（场上满/图太挤时为 false，调用方不必处理，下波再补）。
-  forceSpawn(maze, powerups, tanks) {
+  forceSpawn(maze, powerups, tanks, mines = []) {
     if (this.types.length === 0) return false;
     if (powerups.length >= this.cap) return false;
 
-    const spot = this.pickSpot(maze, powerups, tanks);
+    const spot = this.pickSpot(maze, powerups, tanks, mines);
     if (!spot) return false; // 没找到合适位置
 
     const type = this.types[Math.floor(Math.random() * this.types.length)];
@@ -203,9 +206,16 @@ export class PowerupSpawner {
     return true;
   }
 
-  // 随机选一个刷新点：随机格中心 → 推出墙体 → 校验不与现有道具/坦克太近。
+  // 随机选一个刷新点：随机格中心 → 推出墙体 → 校验不与现有道具/坦克/地雷太近。
   // 试若干次仍找不到就返回 null（地图太挤，本次不刷）。
-  pickSpot(maze, powerups, tanks) {
+  //
+  // **为什么要避雷**：警戒后的雷是**完全隐形**的（mine.visibility 三条已钉死
+  // 「主人也看不见，靠记忆」），所以把补给刷进雷的触发圈 = 摆一个看起来白捡、
+  // 走过去必死的诱饵，而且玩家读不出原因。AI 免疫这条：它读 world.mines 有
+  // 完美记忆、BFS 又禁行雷格——**所以这只坑真人**，正是最该修的那一类。
+  // 避雷半径取「触发圈 + 拾取圈」：玩家必须走到拾取圈内才吃到它，
+  // 所以只要格心离雷 ≥ triggerRadius + POWERUP.radius，走过去时就不会踩进触发圈。
+  pickSpot(maze, powerups, tanks, mines = []) {
     for (let tries = 0; tries < 12; tries++) {
       const c = Math.floor(Math.random() * maze.cols);
       const r = Math.floor(Math.random() * maze.rows);
@@ -220,6 +230,11 @@ export class PowerupSpawner {
       // 避开正踩在该点的坦克（否则一刷出来立刻被吃，没存在感）
       let tooClose = tanks.some(
         (t) => t.alive && Math.hypot(t.x - x, t.y - y) < clear
+      );
+      // 避开地雷的杀伤范围（见方法头注释：隐形雷 + 诱饵 = 讲不清的死）
+      const mineClear = POWERUP.mine.triggerRadius + POWERUP.radius;
+      tooClose = tooClose || mines.some(
+        (m) => !m.exploded && Math.hypot(m.x - x, m.y - y) < mineClear
       );
       // 避开已有道具，别叠在一起
       tooClose = tooClose || powerups.some(

@@ -7,7 +7,7 @@
 //
 // 生成流程：
 //   1) 从"全开放"起步（内部无墙），外边界封闭
-//   2) 每条内部边按 WALL_DENSITY 概率放一堵墙
+//   2) 每条内部边按 MAZE_STYLES.sparse.density 概率放一堵墙
 //   3) 连通性修复：泛洪检查，把被围出的孤立区域打通
 //      （顺带消除"四面被围死"的格子）
 //
@@ -15,7 +15,7 @@
 // 每个格用四面墙的开关表示：top/right/bottom/left。相邻两格共享一堵墙。
 // ============================================================
 
-import { CELL_SIZE, WALL_DENSITY, WALL, MAZE_STYLES, MAZE_FLOOR } from "./config.js";
+import { CELL_SIZE, WALL, MAZE_STYLES, MAZE_FLOOR } from "./config.js";
 import { closestPointOnSegment } from "./collision.js";
 
 // 四方向表：格间邻接 + 对应墙面名。maze 自用（泛洪/敲墙），ai.js 寻路也复用。
@@ -90,10 +90,13 @@ function buildMaze(cols, rows, style) {
 
 // —— 风格 1：稀疏格栅（原版风，独立随机每条内部边）——
 function fillSparse(cells, cols, rows) {
+  // 密度从风格表读（与 symmetric 同一个来源），不直读顶层 WALL_DENSITY——
+  // 那样会让 MAZE_STYLES.sparse.density 变成改了没反应的死旋钮
+  const density = MAZE_STYLES.sparse.density;
   // 垂直内墙：格 (c,r) 的 right ↔ 格 (c+1,r) 的 left
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols - 1; c++) {
-      if (Math.random() < WALL_DENSITY) {
+      if (Math.random() < density) {
         cells[r][c].right = true;
         cells[r][c + 1].left = true;
       }
@@ -102,7 +105,7 @@ function fillSparse(cells, cols, rows) {
   // 水平内墙：格 (c,r) 的 bottom ↔ 格 (c,r+1) 的 top
   for (let r = 0; r < rows - 1; r++) {
     for (let c = 0; c < cols; c++) {
-      if (Math.random() < WALL_DENSITY) {
+      if (Math.random() < density) {
         cells[r][c].bottom = true;
         cells[r + 1][c].top = true;
       }

@@ -323,9 +323,11 @@ export class Tank {
 
     // —— 护盾环（持有护盾时，套在车体外的旋转虚线光环）——
     // 单独一段：只平移不旋转，让光环动画与车头朝向解耦（环跟着车走但自转）。
-    // 旋转用 lineDashOffset 随 shieldTimer 推进；快到期时（<1.5s）闪烁提示即将消失。
+    // 旋转用 lineDashOffset 随 shieldTimer 推进；快到期时闪烁提示即将消失，
+    // 阈值与 HUD 徽章共读 POWERUP.shield.blinkUnder（原先两处各硬编码 1.5）。
     if (this.shield) {
-      const blink = this.shieldTimer < 1.5 ? 0.4 + 0.4 * Math.abs(Math.sin(this.shieldTimer * 8)) : 0.8;
+      const blink = this.shieldTimer < POWERUP.shield.blinkUnder
+        ? 0.4 + 0.4 * Math.abs(Math.sin(this.shieldTimer * 8)) : 0.8;
       ctx.save();
       ctx.translate(this.x, this.y);
       ctx.globalAlpha = blink;
